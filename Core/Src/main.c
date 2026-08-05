@@ -38,7 +38,8 @@
 /* USER CODE BEGIN PD */
 
 #define BENCHMARK_LOOPS  1000U
-
+#define STEPPER_MOVE_PULSES   6400U
+#define KEY_DEBOUNCE_MS       50U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -49,6 +50,12 @@
 
 /* USER CODE BEGIN PV */
 static volatile uint8_t flag_music = 0U;
+static volatile uint32_t stepper_pulse_count = 0U;
+static volatile uint8_t stepper_busy = 0U;
+static volatile int8_t stepper_move_request = 0;
+
+static uint32_t key2_last_tick = 0U;
+static uint32_t key3_last_tick = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -208,6 +215,27 @@ static void Buzzer_PlayTwoTigers(void)
   }
 }
 
+static void Stepper_StartMove(GPIO_PinState direction)
+{
+  stepper_busy = 1U;
+  stepper_pulse_count = 0U;
+
+  /* 设置方向：按键 2 为正向，按键 3 为反向。若实际方向相反，交换 SET/RESET。 */
+  HAL_GPIO_WritePin(DIR_GPIO_Port, DIR_Pin, direction);
+
+  /* DIR 改变后再发 STEP，留出充足建立时间。 */
+  HAL_Delay(1U);
+
+  /* 从一个完整的新 PWM 周期开始计数。 */
+  __HAL_TIM_SET_COUNTER(&htim3, 0U);
+  __HAL_TIM_CLEAR_FLAG(&htim3, TIM_FLAG_CC1);
+
+  /*
+   * 使用带中断的 PWM。
+   * 每个 PWM 周期产生一个 STEP 上升沿，随后在 CC1 处产生一次回调。
+   */
+  HAL_TIM_PWM_Start_IT(&htim3, TIM_CHANNEL_1);
+}
 /* USER CODE END 0 */
 
 /**
@@ -245,6 +273,7 @@ int main(void)
   MX_USART3_UART_Init();
   MX_USART1_UART_Init();
   MX_TIM4_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   uint32_t device_id[3];
 
@@ -266,7 +295,26 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
+
     /* USER CODE BEGIN 3 */
+    if ((stepper_busy == 0U) && (stepper_move_request != 0))
+    {
+      int8_t request;
+
+      __disable_irq();
+      request = stepper_move_request;
+      stepper_move_request = 0;
+      __enable_irq();
+
+      if (request > 0)
+      {
+        Stepper_StartMove(GPIO_PIN_SET);    /* 按键 2：正向 */
+      }
+      else
+      {
+        Stepper_StartMove(GPIO_PIN_RESET);  /* 按键 3：反向 */
+      }
+    }
     if (flag_music == 1) {
       Buzzer_PlayTwoTigers();
       HAL_Delay(1000);
@@ -334,28 +382,57 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-
-  /** Enables the Clock Security System
-  */
-  HAL_RCC_EnableCSS();
 }
 
 /* USER CODE BEGIN 4 */
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-  if (GPIO_Pin == KEY1_Pin && flag_music == 0)
+  uint32_t now = HAL_GetTick();
+
+  if (GPIO_Pin == KEY1_Pin && flag_music == 0U)
   {
     HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
-    flag_music = 1;
+    flag_music = 1U;
   }
   else if (GPIO_Pin == KEY2_Pin)
   {
-    HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
+    if ((stepper_busy == 0U) &&
+        (stepper_move_request == 0) &&
+        ((now - key2_last_tick) >= KEY_DEBOUNCE_MS))
+    {
+      key2_last_tick = now;
+      stepper_move_request = 1;       /* 请求正向 */
+      HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
+    }
   }
   else if (GPIO_Pin == KEY3_Pin)
   {
-    HAL_GPIO_TogglePin(LED3_GPIO_Port, LED3_Pin);
+    if ((stepper_busy == 0U) &&
+        (stepper_move_request == 0) &&
+        ((now - key3_last_tick) >= KEY_DEBOUNCE_MS))
+    {
+      key3_last_tick = now;
+      stepper_move_request = -1;      /* 请求反向 */
+      HAL_GPIO_TogglePin(LED3_GPIO_Port, LED3_Pin);
+    }
+  }
+}
+void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim->Instance == TIM3)
+  {
+    stepper_pulse_count++;
+
+    if (stepper_pulse_count >= STEPPER_MOVE_PULSES)
+    {
+      /*
+       * CC1 发生在当前 PWM 高电平结束后，
+       * 因而停止时最后一个 STEP 脉冲已完整输出。
+       */
+      HAL_TIM_PWM_Stop_IT(&htim3, TIM_CHANNEL_1);
+      stepper_busy = 0U;
+    }
   }
 }
 /* USER CODE END 4 */
