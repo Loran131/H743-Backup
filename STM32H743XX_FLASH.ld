@@ -213,6 +213,25 @@ SECTIONS
   PROVIDE( __arm32_tls_tcb_offset = MAX(8, __tls_align) );
   PROVIDE( __arm64_tls_tcb_offset = MAX(16, __tls_align) );
 
+    /* Ethernet DMA descriptors: D2 SRAM, accessible by ETH DMA. */
+  .RxDecripSection (NOLOAD) :
+  {
+    . = ABSOLUTE(0x30000000);
+    *(.RxDecripSection)
+  } >RAM_D2
+
+  .TxDecripSection (NOLOAD) :
+  {
+    . = ABSOLUTE(0x30000080);
+    *(.TxDecripSection)
+  } >RAM_D2
+
+  .Rx_PoolSection (NOLOAD) :
+  {
+    . = ABSOLUTE(0x30000100);
+    *(.Rx_PoolSection)
+  } >RAM_D2
+
   .bss (NOLOAD) : ALIGN(4)
   {
     *(.bss)

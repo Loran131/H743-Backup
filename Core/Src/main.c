@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "eth.h"
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
@@ -274,6 +275,7 @@ int main(void)
   MX_USART1_UART_Init();
   MX_TIM4_Init();
   MX_TIM3_Init();
+  MX_ETH_Init();
   /* USER CODE BEGIN 2 */
   uint32_t device_id[3];
 
@@ -285,9 +287,10 @@ int main(void)
          (unsigned long)device_id[0], (unsigned long)device_id[1],
          (unsigned long)device_id[2]);
   printf("System clock: %lu Hz\r\n", (unsigned long)SystemCoreClock);
-  // RunMathBenchmark();
+  RunMathBenchmark();
   // Buzzer_PlayTwoTigers();
   flag_music = 0;
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -297,30 +300,67 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    if ((stepper_busy == 0U) && (stepper_move_request != 0))
-    {
-      int8_t request;
+  HAL_Delay(500U);
+  HAL_StatusTypeDef status_id1;
+  HAL_StatusTypeDef status_id2;
+  HAL_StatusTypeDef status_bmsr;
+  uint32_t phy_id1 = 0xDEADBEEFU;
+  uint32_t phy_id2 = 0xDEADBEEFU;
+  uint32_t bmsr = 0xDEADBEEFU;
 
-      __disable_irq();
-      request = stepper_move_request;
-      stepper_move_request = 0;
-      __enable_irq();
+  status_id1 = HAL_ETH_ReadPHYRegister(&heth, 0U, 2U, &phy_id1);
+  status_id2 = HAL_ETH_ReadPHYRegister(&heth, 0U, 3U, &phy_id2);
+  status_bmsr = HAL_ETH_ReadPHYRegister(&heth, 0U, 1U, &bmsr);
 
-      if (request > 0)
-      {
-        Stepper_StartMove(GPIO_PIN_SET);    /* 按键 2：正向 */
-      }
-      else
-      {
-        Stepper_StartMove(GPIO_PIN_RESET);  /* 按键 3：反向 */
-      }
-    }
-    if (flag_music == 1) {
-      Buzzer_PlayTwoTigers();
-      HAL_Delay(1000);
-      flag_music = 0;
-      HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
-    }
+  printf("MDIO status: ID1=%d ID2=%d BMSR=%d\r\n",
+         status_id1, status_id2, status_bmsr);
+  printf("PHY ID: %08lX %08lX, BMSR=%08lX\r\n",
+         phy_id1, phy_id2, bmsr);
+  //
+  //   if ((stepper_busy == 0U) && (stepper_move_request != 0))
+  //   {
+  //     int8_t request;
+  //
+  //     __disable_irq();
+  //     request = stepper_move_request;
+  //     stepper_move_request = 0;
+  //     __enable_irq();
+  //
+  //     if (request > 0)
+  //     {
+  //       Stepper_StartMove(GPIO_PIN_SET);    /* 按键 2：正向 */
+  //     }
+  //     else
+  //     {
+  //       Stepper_StartMove(GPIO_PIN_RESET);  /* 按键 3：反向 */
+  //     }
+  //   }
+  //   if (flag_music == 1) {
+  //     Buzzer_PlayTwoTigers();
+  //     HAL_Delay(1000);
+  //     flag_music = 0;
+  //     HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
+  //   }
+  //
+    // MX_LWIP_Process();
+
+    HAL_Delay(5000U);
+    //
+    // HAL_StatusTypeDef status_id1;
+    // HAL_StatusTypeDef status_id2;
+    // HAL_StatusTypeDef status_bmsr;
+    // uint32_t phy_id1 = 0xDEADBEEFU;
+    // uint32_t phy_id2 = 0xDEADBEEFU;
+    // uint32_t bmsr = 0xDEADBEEFU;
+    //
+    // status_id1 = HAL_ETH_ReadPHYRegister(&heth, 0U, 2U, &phy_id1);
+    // status_id2 = HAL_ETH_ReadPHYRegister(&heth, 0U, 3U, &phy_id2);
+    // status_bmsr = HAL_ETH_ReadPHYRegister(&heth, 0U, 1U, &bmsr);
+    //
+    // printf("MDIO status: ID1=%d ID2=%d BMSR=%d\r\n",
+    //        status_id1, status_id2, status_bmsr);
+    // printf("PHY ID: %08lX %08lX, BMSR=%08lX\r\n",
+    //        phy_id1, phy_id2, bmsr);
 
   }
   /* USER CODE END 3 */
