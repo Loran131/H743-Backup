@@ -1,0 +1,21 @@
+# IDE
+.idea/
+
+# Build output
+build/
+Debug/
+Release/
+*.o
+*.d
+*.elf
+*.hex
+*.bin
+*.list
+*.map
+
+# CubeMX user settings
+.mxproject
+
+# OS
+Thumbs.db
+.DS_Store

@@ -1,0 +1,4 @@
+  & 'ESTM32CubeCLTSTM32CubeProgrammerbinSTM32_Programmer_CLI.exe' `
+    -c port=SWD mode=UR reset=HWrst freq=1000 `
+    -d 'E000MCU000smartcar000project103projecthseTestH743buildDebugTestH743.elf' `
+    -v -rst

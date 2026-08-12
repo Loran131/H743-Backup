@@ -1,0 +1,176 @@
+STM32C552 传感器滤波方案 V2.0
+==============================
+
+1. 目标
+
+- 过滤 TOF 和 K230 的单点毛刺与小幅抖动。
+- 只在收到校验正确、字段有效的新传感器响应时更新过滤器。
+- C552 每 20 ms 向 H743 发送一次最新快照，重复快照不重复执行滤波。
+- 保留 sample_seq、sample_tick、原始计数和拒绝计数，支持后续实测调参。
+- TOF 同时提供平滑距离和最近 3 个可信原始距离的最小值。
+
+
+2. 数据链路
+
+UART DMA 接收
+    -> 环形缓冲区
+    -> 协议帧解析与校验
+    -> 设备 ID/串口归属检查
+    -> 原始字段有效性检查
+    -> 3 点中值滤波
+    -> EMA 指数平滑
+    -> 更新 sample_seq、sample_tick 和状态
+    -> 每 20 ms 构造 V2 快照
+    -> USART1 TX DMA 发送
+
+滤波只能在 update_tof() 和 update_k230() 收到新响应时执行，不能在快照发送函数中执行。
+
+
+3. 公共滤波流程
+
+每个独立数值维护：
+
+- filtered：EMA 结果。
+- median_buf[3]：最近 3 个有效新样本。
+- median_count：当前已收集样本数。
+- median_index：下一次写入位置。
+- initialized：是否已经初始化。
+
+每个逻辑设备维护：
+
+- sample_seq：接受一个有效新响应后加 1。
+- last_sample_tick：最后一个有效新响应的 HAL tick。
+- accepted_count：接受的响应数。
+- rejected_count：拒绝的响应数。
+- recovery_count：当前连续有效恢复样本数。
+- valid：是否已经累计连续 3 个有效新样本。
+
+
+4. 普通数值滤波
+
+TOF 距离、K230 Center_X 和 Center_Y 使用普通数值滤波。
+
+3 点中值：
+
+median = median3(sample_0, sample_1, sample_2)
+
+EMA：
+
+filtered = filtered + alpha x (median - filtered)
+
+首次恢复时不从旧 EMA 继续收敛。连续收集 3 个有效新样本后，以这 3 个样本的中值
+重新初始化 filtered，然后才置 valid=1。
+
+
+5. 0/360 度环形角度滤波
+
+X_ROTATION 表示上下方向旋转，Y_ROTATION 表示左右方向旋转。
+X_ROTATION 和 Y_ROTATION 均以 0.01 度为内部单位，周期为 36000。
+两个轴都可能出现如下正常跨界：
+
+35800 -> 35950 -> 40 -> 120
+
+不能直接对这些数值求普通中值或普通 EMA。
+
+先把每个角度相对上一次 filtered 展开到最短方向：
+
+delta = wrap_to_half_turn(sample - filtered)
+unwrapped_sample = filtered + delta
+
+其中 delta 的范围为 [-18000, 18000)。对三个展开值求中值后执行：
+
+median_delta = wrap_to_half_turn(median - filtered)
+filtered = wrap_to_turn(filtered + alpha x median_delta)
+
+wrap_to_turn() 把结果归一化到 [0, 36000)。这样 359 度到 1 度只会沿 2 度的最短路径变化，
+不会错误地经过 180 度。
+
+
+6. TOF 处理
+
+输入有效范围：0~1600 mm，包含实测可用的超近距离读数。
+查询周期：10 ms。
+单次响应超时：500 ms。
+stale：500 ms。该值覆盖当前可能保存的高精度测量模式周期，并在一次完整响应超时后失效。
+EMA alpha：0.25。
+
+范围外、校验失败、ID 冲突和过期响应不更新过滤状态，只增加相应拒绝/错误计数。
+
+第一版暂不启用基于相邻样本变化率的硬拒绝门限。该门限需要结合末端最大运动速度和
+原始数据日志确定，贸然设置可能拒绝真实的快速运动；accepted/rejected 计数先保留用于调参。
+
+每个 TOF 额外维护最近 3 个有效原始距离窗口：
+
+tof_min3_raw = min(raw_0, raw_1, raw_2)
+
+该值用于保守的近距离辅助判断；正常抓取距离仍使用 tof_filtered。
+stale、设备重新识别或 ID 冲突后清空原始窗口，恢复时重新收集 3 个样本。
+
+
+7. K230 处理
+
+K230 识别到目标时约每 10 ms 发送一帧，无目标时不发送。
+stale：150 ms。
+坐标 EMA alpha：0.25。
+角度 EMA alpha：0.20。
+
+无数据超过 150 ms 后：
+
+- valid=0，stale=1。
+- 保留最后 filtered 供诊断。
+- 不判定为 K230 链路故障，不触发整车通信故障。
+- 不增加心跳协议。
+
+重新收到数据后连续 3 帧恢复 valid，约需要 30 ms。
+
+
+8. 状态机
+
+UNINITIALIZED：
+- 没有可信输出，VALID=0、STALE=1。
+
+RECOVERING：
+- 已收到 1~2 个连续有效新样本。
+- VALID=0、STALE=0。
+- 第 3 个有效样本到达后，以三点中值初始化 EMA。
+
+VALID：
+- VALID=1、STALE=0。
+- 每个有效新样本执行中值和 EMA。
+
+STALE：
+- 最后有效样本超过设备 stale 时间。
+- VALID=0、STALE=1。
+- 保留 filtered，但清空恢复计数和 TOF min3 原始窗口。
+
+
+9. 第一版参数汇总
+
+C552 -> H743 发送周期：20 ms
+C552 -> H743 波特率：460800 8N1
+恢复有效样本数：3
+中值窗口：3
+
+TOF 查询周期：10 ms
+TOF 单次响应超时：500 ms
+TOF stale：500 ms
+TOF EMA alpha：0.25
+TOF 有效范围：0~1600 mm
+
+K230 正常发送周期：约 10 ms
+K230 stale：150 ms
+K230 坐标 EMA alpha：0.25
+K230 角度 EMA alpha：0.20
+K230 角度周期：36000（0.01 度）
+
+
+10. 验证要求
+
+- 静止 TOF 和静止标签下，filtered 峰峰值明显低于 raw。
+- 单点高低毛刺不直接进入 filtered。
+- 角度序列 359.x -> 0.x 或 0.x -> 359.x 时，滤波结果沿最短方向连续变化。
+- 同一传感器值被多个 20 ms 快照发送时，sample_seq 不增加。
+- TOF 范围外响应不更新 sample_seq、sample_tick、EMA 和 min3。
+- K230 无目标 150 ms 后变为 VALID=0、STALE=1，但不产生链路故障。
+- stale 恢复后使用新三点中值初始化，不继承长时间以前的 EMA 状态。
+- H743 能在 CRC 错误、丢字节和粘包后重新同步 V2 帧。

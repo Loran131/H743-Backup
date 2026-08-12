@@ -245,6 +245,13 @@ SECTIONS
   } >DTCMRAM
   PROVIDE( __non_tls_bss_start = ADDR(.bss) );
 
+  /* DMA1 cannot access DTCM. Keep peripheral DMA buffers in AXI SRAM. */
+  .dma_buffer (NOLOAD) : ALIGN(32)
+  {
+    *(.dma_buffer)
+    *(.dma_buffer*)
+  } >RAM
+
   PROVIDE( __bss_start = __tbss_start );
   PROVIDE( __bss_size = __bss_end - __bss_start );
 

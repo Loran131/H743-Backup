@@ -1,0 +1,206 @@
+================================================================================
+STM32H743IIT6 GPIO 代码检查报告
+检查对象: E:\000MCU\000smartcar\000project\100project\Core\Src\*.c
+参照规范: GPIO需求规范.txt
+日期: 2026-07-31
+================================================================================
+符号说明:  ✅ 正确   ⚠️ 需注意   ❌ 错误/需修改
+================================================================================
+
+================================================================================
+一、系统与时钟
+================================================================================
+✅ PA13/PA14 SWD      — SYS_JTMS-SWDIO / SYS_JTCK-SWCLK  正确 (gpio.c注释)
+✅ PH0/PH1 HSE        — RCC_OSC_IN/OUT                    正确 (gpio.c注释)
+✅ PC14/PC15 LSE      — RCC_OSC32_IN/OUT                  正确 (gpio.c注释)
+✅ BOOT0              — GPIO_Input, Pull-DOWN             正确 (gpio.c注释)
+✅ PDR_ON             — PDR_ON                            正确 (gpio.c注释)
+
+❌ 系统时钟源          — main.c SystemClock_Config() 使用 HSI 作为 PLL 源!
+  文件: main.c:151  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  问题: 原理图有 25MHz HSE 晶振, ETH RMII 需要精确时钟
+  修改: PLLSource 改为 RCC_PLLSOURCE_HSE
+        添加: RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+        添加: RCC_OscInitStruct.OscillatorType |= RCC_OSCILLATORTYPE_HSE;
+
+================================================================================
+二、以太网 ETH (eth.c)
+================================================================================
+✅ PA1  ETH_REF_CLK    — AF11, PP, NOPULL   eth.c:131-136
+✅ PA2  ETH_MDIO       — AF11, PP, NOPULL   eth.c:131-136
+✅ PA7  ETH_CRS_DV     — AF11, PP, NOPULL   eth.c:131-136
+✅ PC1  ETH_MDC        — AF11, PP, NOPULL   eth.c:124-129
+✅ PC4  ETH_RXD0       — AF11, PP, NOPULL   eth.c:124-129
+✅ PC5  ETH_RXD1       — AF11, PP, NOPULL   eth.c:124-129
+✅ PB11 ETH_TX_EN      — AF11, PP, NOPULL   eth.c:138-143
+✅ PG13 ETH_TXD0       — AF11, PP, NOPULL   eth.c:145-150
+✅ PG14 ETH_TXD1       — AF11, PP, NOPULL   eth.c:145-150
+✅ PD3  ETH_RESET      — Output, PP, NOPULL  gpio.c:187-192
+
+================================================================================
+三、QSPI Flash (quadspi.c)
+================================================================================
+✅ PB2  QSPI_CLK       — AF9,  PP, NOPULL   quadspi.c:106-111
+✅ PB6  QSPI_NCS       — AF10, PP, NOPULL   quadspi.c:113-118
+✅ PF8  QSPI_IO0       — AF10, PP, NOPULL   quadspi.c:98-104
+✅ PF9  QSPI_IO1       — AF10, PP, NOPULL   quadspi.c:98-104
+✅ PF7  QSPI_IO2       — AF9,  PP, NOPULL   quadspi.c:92-97
+✅ PF6  QSPI_IO3       — AF9,  PP, NOPULL   quadspi.c:92-97
+
+================================================================================
+四、I2C2 EEPROM (i2c.c)
+================================================================================
+✅ PH4  I2C2_SCL       — AF4, OD, NOPULL  (板上2k上拉)   i2c.c:98-103
+✅ PH5  I2C2_SDA       — AF4, OD, NOPULL  (板上2k上拉)   i2c.c:98-103
+
+================================================================================
+五、FDCAN2 (fdcan.c)
+================================================================================
+✅ PB12 FDCAN2_RX      — AF9, PP, NOPULL   fdcan.c:106-111
+✅ PB13 FDCAN2_TX      — AF9, PP, NOPULL   fdcan.c:106-111
+
+================================================================================
+六、USART1 调试串口 (usart.c)
+================================================================================
+✅ PA9  USART1_TX      — AF7, PP, NOPULL   usart.c:356-361
+✅ PA10 USART1_RX      — AF7, PP, NOPULL   usart.c:356-361
+
+================================================================================
+七、UART4 扩展 (usart.c)
+================================================================================
+⚠️ PA11 UART4_RX       — AF6, PP, NOPULL   代码中 PA11=RX, PA12=TX
+⚠️ PA12 UART4_TX       — AF6, PP, NOPULL   与需求规范中标注相反
+   原因: 这是交叉连接(MCU TX→外设RX, MCU RX←外设TX), 正常
+   确认: 只要原理图上 PA12 连 UART4_TX 排针, PA11 连 UART4_RX 排针 即为正确
+
+================================================================================
+八、UART5 扩展 (usart.c)
+================================================================================
+✅ PC12 UART5_TX       — AF8, PP, NOPULL   usart.c:314-319
+✅ PD2  UART5_RX       — AF8, PP, NOPULL   usart.c:322-327
+
+================================================================================
+九、USART3 扩展 (usart.c)
+================================================================================
+✅ PC10 USART3_TX      — AF7, PP, NOPULL   usart.c:390-395
+✅ PC11 USART3_RX      — AF7, PP, NOPULL   usart.c:390-395
+
+================================================================================
+十、USART6 扩展 (usart.c)
+================================================================================
+✅ PC6  USART6_TX      — AF7, PP, NOPULL   usart.c:424-429
+✅ PC7  USART6_RX      — AF7, PP, NOPULL   usart.c:424-429
+
+================================================================================
+十一、TIM2 舵机 PWM (tim.c)
+================================================================================
+✅ PB3  TIM2_CH2       — AF1, PP, NOPULL   tim.c:162-167
+   PWM Mode: PWM1, OCPolarity HIGH, Prescaler=0, Period=MAX
+   ⚠️ Prescaler/Period 为默认值, 实际使用需根据舵机频率重设:
+     50Hz舵机 → 如 240MHz时钟, Prescaler=2400-1, Period=2000-1 → 50Hz/0.5us分辨率
+     (此项为应用层配置, 不算GPIO错误)
+
+================================================================================
+十二、TIM4 蜂鸣器+步进 (tim.c)
+================================================================================
+✅ PB7  TIM4_CH2       — AF2, PP, NOPULL   tim.c:184-189 (蜂鸣器)
+✅ PB8  TIM4_CH3       — AF2, PP, NOPULL   tim.c:184-189 (步进1 STEP)
+   PWM Mode: PWM1, OCPolarity HIGH, Prescaler=0, Period=65535
+   ⚠️ 同上, Prescaler/Period 需根据实际频率重设
+
+================================================================================
+十三、GPIO Output — LED (gpio.c)
+================================================================================
+✅ PB0  LED1           — Output OD, NOPULL, LOW speed   gpio.c:129-134
+✅ PB1  LED0           — Output OD, NOPULL, LOW speed   gpio.c:129-134
+✅ PA15 LED2           — Output OD, NOPULL, LOW speed   gpio.c:180-185
+   初始电平: GPIO_PIN_RESET (低电平=LED亮)
+   注: 用户确认 PCB 限制只能开漏, 代码已正确配置
+
+================================================================================
+十四、GPIO Output — 步进方向 (gpio.c)
+================================================================================
+✅ PB9  DIR1           — Output PP, NOPULL, LOW speed   gpio.c:194-199
+
+================================================================================
+十五、GPIO Input — nFAULT (gpio.c)
+================================================================================
+✅ PG2  nFAULT1        — Input, PULLUP                  gpio.c:174-178
+
+================================================================================
+十六、GPIO Input — 按键 (gpio.c)
+================================================================================
+✅ PH3  KEY0           — Input, NOPULL  (板上外部上拉)   gpio.c:111-119
+✅ PH2  KEY1           — Input, NOPULL  (板上外部上拉)   gpio.c:111-119
+✅ PC13 KEY2           — Input, NOPULL  (板上外部上拉)   gpio.c:93-99
+
+⚠️ PA0  WK_UP          — gpio.c注释写 PA0→PWR_WKUP1, 但未在 MX_GPIO_Init 中初始化
+   原因: WKUP 由 PWR 外设自动配置, 不需要 GPIO_Init
+   影响: 仍可通过 HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) 读取按键状态
+   (如果读到始终为0, 需要在CubeMX中同时将PA0设为GPIO_Input+WKUP1)
+
+================================================================================
+十七、SPI2 — 不应使用 (gpio.c)
+================================================================================
+❌ PB14 SPI2_MISO      — 代码 AF5, PP, NOPULL   gpio.c:154-160
+❌ PB15 SPI2_MOSI      — 代码 AF5, PP, NOPULL   gpio.c:154-160
+   问题: 原理图上 SPI2 外设没有连接任何芯片
+         PB6 是 QSPI_NCS (已正确配置), 不是 SPI2_NSS
+   CubeMX 中应将 SPI2 模块 Disable
+   PB14, PB15 设为 GPIO_Input, NOPULL (排针备用)
+
+================================================================================
+十八、FMC/NC 引脚 (gpio.c)
+================================================================================
+✅ GPIOE PE0~PE15       — Input, NOPULL   gpio.c:75-81
+✅ GPIOI PI0~PI11       — Input, NOPULL   gpio.c:86-91
+✅ GPIOF PF0~PF5,PF10~PF15 — Input, NOPULL   gpio.c:104-109
+✅ GPIOH PH2~PH3,PH6~PH15 — Input, NOPULL   gpio.c:114-119
+✅ GPIOG PG0~PG1,PG3~PG12,PG15 — Input, NOPULL   gpio.c:140-146
+✅ GPIOD PD0~PD1,PD4~PD15 — Input, NOPULL   gpio.c:166-172
+✅ GPIOB PB4~PB5,PB10   — Input, NOPULL   gpio.c:149-152
+✅ GPIOA PA3~PA6,PA8    — Input, NOPULL   gpio.c:123-127
+✅ GPIOC PC0,PC2~PC3,PC8~PC9 — Input, NOPULL   gpio.c:95-99
+
+🔍 PA4, PA5 同时出现在:
+   - eth.c 中作为 ETH_RXD0/RXD1 (AF11) ← 正确用法!
+   - gpio.c 中作为 Input NOPULL ← 会被 AF 覆盖, 无影响但冗余
+   注意: 代码实际用的是 PC4/PC5 做 ETH_RXD0/RXD1, PA4/PA5 为 NC
+   确认 PA4/PA5 原理图上确实是 ETH 还是 NC?
+   如果原理图上 ETH 用 PC4/PC5, 则 gpio.c 中 PA4/PA5=Input NOPULL 正确
+
+🔍 PC0 同时出现在:
+   - gpio.c:93 作为 Input NOPULL
+   - 原理图上 SPEED_LED 未接 (下拉接地)
+   → 设为 Input NOPULL 正确 ✅
+
+================================================================================
+总结
+================================================================================
+
+【必须修改 ❌】
+1. 系统时钟: main.c 将 PLLSOURCE 从 HSI 改为 HSE (需CubeMX重新生成)
+            添加 RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+
+2. SPI2: CubeMX 中 Disable SPI2 模块
+          PB14/PB15 从 AF5 SPI2 改为 GPIO_Input NOPULL
+
+【建议检查 ⚠️】
+3. PA0 WKUP: 确认能读到按键状态, 如果不能读则在CubeMX同时配置PA0为WKUP1+GPIO_Input
+4. UART4 PA11/PA12 RX/TX 方向: 确认原理图排针标注与代码中 RX/TX 一致 (交叉连接正常)
+5. TIM2/TIM4 Prescaler/Period: 应用层代码需要根据实际PWM频率重新计算
+
+【已确认正确 ✅】
+- ETH 9pin (含 PC4/PC5 修正)
+- QSPI 6pin
+- I2C2 (AF_OD)
+- FDCAN2
+- 5路 UART/USART
+- TIM2/TIM4 PWM
+- LED Open Drain
+- DIR1 Push Pull
+- nFAULT1 Input Pull-up
+- 按键 Input NOPULL (外部上拉)
+- FMC/NC/排针 GPIO_Input NOPULL (约79个)
+
+================================================================================

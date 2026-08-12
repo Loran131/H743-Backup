@@ -1,0 +1,98 @@
+STM32C552VET6 使用 ST-Link/OpenOCD 读取芯片 ID
+================================================
+
+一、本次实测结果
+
+目标电压：3.247 V
+SWD DPIDR：0x6BA02477
+DBGMCU_IDCODE：0x1003644E
+DEV_ID：0x44E（IDCODE 的低 12 位）
+REV_ID：0x1003（IDCODE 的高 16 位）
+CPU CPUID：0x410FD214
+CPU：Cortex-M33 r0p4
+
+
+二、为什么不能直接套用旧 STM32 的 OpenOCD 配置
+
+当前 OpenOCD 版本没有 STM32C5 专用 target 脚本。STM32C552 的调试访问端口分布为：
+
+AP0：STMicroelectronics 专用 APB MEM-AP，用于访问 DBGMCU。
+AP1：系统 AHB3 MEM-AP，用于访问 Cortex-M33 和系统地址空间。
+
+如果错误地把 Cortex-M33 配置在 AP0，读取 0xE000ED00 会失败。CPU target 必须选择
+AP1；DBGMCU_IDCODE 则通过 AP0 的地址 0xE00E4000 读取。
+
+
+三、准备条件
+
+1. ST-Link 连接 SWDIO、SWCLK、GND 和目标参考电压。
+2. 本机 OpenOCD 路径：
+   C:\Program Files\OpenOCD-20260302-0.12.0\bin\openocd.exe
+3. OpenOCD scripts 路径：
+   C:\Program Files\OpenOCD-20260302-0.12.0\share\openocd\scripts
+4. 以下命令只读，不复位、不擦除、不下载程序。
+
+
+四、先确认 SWD 和 DAP 能连接
+
+在 PowerShell 中执行下面的一行命令：
+
+& 'C:\Program Files\OpenOCD-20260302-0.12.0\bin\openocd.exe' -s 'C:\Program Files\OpenOCD-20260302-0.12.0\share\openocd\scripts' -f interface/stlink.cfg -c 'transport select swd' -c 'adapter speed 1000' -c 'swd newdap stm32c5 cpu' -c 'dap create stm32c5.dap -chain-position stm32c5.cpu' -c 'target create stm32c5.ap0 mem_ap -dap stm32c5.dap -ap-num 0' -c 'gdb port disabled' -c 'tcl port disabled' -c 'telnet port disabled' -c 'init' -c 'stm32c5.dap info 0' -c 'stm32c5.dap info 1' -c 'shutdown'
+
+正常时应看到：
+
+SWD DPIDR 0x6ba02477
+AP0 IDR 0x54770002（APB MEM-AP）
+AP1 IDR 0x84770001（AHB3 MEM-AP）
+
+
+五、读取 DBGMCU_IDCODE
+
+& 'C:\Program Files\OpenOCD-20260302-0.12.0\bin\openocd.exe' -s 'C:\Program Files\OpenOCD-20260302-0.12.0\share\openocd\scripts' -f interface/stlink.cfg -c 'transport select swd' -c 'adapter speed 1000' -c 'swd newdap stm32c5 cpu' -c 'dap create stm32c5.dap -chain-position stm32c5.cpu' -c 'target create stm32c5.ap0 mem_ap -dap stm32c5.dap -ap-num 0' -c 'gdb port disabled' -c 'tcl port disabled' -c 'telnet port disabled' -c 'init' -c 'targets stm32c5.ap0' -c 'mdw 0xE00E4000 1' -c 'shutdown'
+
+本次输出：
+
+0xe00e4000: 1003644e
+
+解析方式：
+
+DEV_ID = 0x1003644E & 0xFFF = 0x44E
+REV_ID = 0x1003644E >> 16 = 0x1003
+
+
+六、读取 Cortex-M33 CPUID
+
+& 'C:\Program Files\OpenOCD-20260302-0.12.0\bin\openocd.exe' -s 'C:\Program Files\OpenOCD-20260302-0.12.0\share\openocd\scripts' -f interface/stlink.cfg -c 'transport select swd' -c 'adapter speed 1000' -c 'swd newdap stm32c5 cpu' -c 'dap create stm32c5.dap -chain-position stm32c5.cpu' -c 'target create stm32c5.cpu cortex_m -dap stm32c5.dap -ap-num 1' -c 'gdb port disabled' -c 'tcl port disabled' -c 'telnet port disabled' -c 'init' -c 'mdw 0xE000ED00 1' -c 'shutdown'
+
+本次输出：
+
+Info : [stm32c5.cpu] Cortex-M33 r0p4 processor detected
+0xe000ed00: 410fd214
+
+
+七、常见问题
+
+1. Failed to read memory at 0xE000ED00
+   通常是把 CPU target 错配到 AP0；改成 -ap-num 1。
+
+2. 读取旧 STM32 常用的 0xE0044000 得到 0
+   STM32C552 的 DBGMCU 不在该地址；使用 AP0 读取 0xE00E4000。
+
+3. 连接不稳定
+   先确认共地和目标参考电压，再把 adapter speed 从 1000 降至 100 或 500。
+
+4. 不要为了读取 ID 使用 reset halt、flash erase 或 program 命令。
+
+
+八、本次 USART1 在线检查
+
+STM32C552 USART1 基址：0x40013800
+ISR 地址：0x4001381C
+
+连续采样 24.1 秒、共 30000 次，结果：
+
+TC=0 样本数：336
+TC 1->0 发送起始边沿：117
+
+这证明当前固件正在反复向 USART1 写入数据。工程 main.c 还明确配置了每 1000 ms
+发送 32 字节随机数据，并通过 printf 输出 TOF 状态信息。

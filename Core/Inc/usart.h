@@ -27,7 +27,6 @@ extern "C" {
 
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "string.h"
 
 /* USER CODE BEGIN Includes */
 
@@ -37,14 +36,26 @@ extern UART_HandleTypeDef huart1;
 
 extern UART_HandleTypeDef huart3;
 
+extern UART_HandleTypeDef huart4;
+
+extern DMA_HandleTypeDef hdma_usart3_rx;
+
 /* USER CODE BEGIN Private defines */
+
+#define USART3_RX_DMA_SIZE  512U
 
 /* USER CODE END Private defines */
 
 void MX_USART1_UART_Init(void);
 void MX_USART3_UART_Init(void);
+void MX_UART4_Init(void);
 
 /* USER CODE BEGIN Prototypes */
+
+void CLI_StartRx(void);
+char *CLI_GetLine(void);
+HAL_StatusTypeDef USART3_StartRx(void);
+void USART3_RxPoll(void);
 
 /* USER CODE END Prototypes */
 

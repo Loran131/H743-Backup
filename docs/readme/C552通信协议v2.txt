@@ -1,0 +1,164 @@
+C552 Sensor Hub -> H743 串口通信协议 V2.0
+============================================
+
+1. 串口参数
+
+波特率：460800 baud
+数据格式：8N1，无流控
+发送方向：STM32C552 -> STM32H743
+发送周期：20 ms（50 Hz）
+帧格式：二进制定长帧，不附加 CR/LF
+帧长度：52 字节
+
+52 字节在 460800 baud、8N1 下的理论线速时间为：
+
+52 x 10 / 460800 = 1.128 ms
+
+20 ms 周期下线路占用率约为 5.64%。
+
+
+2. 完整帧结构
+
+偏移    长度  字段                       格式/说明
+0       1     HEADER_1                   固定 0xAA
+1       1     HEADER_2                   固定 0x55
+2       1     VERSION                    固定 0x02
+3       1     PAYLOAD_LEN                固定 0x2E，表示偏移 4~49 共 46 字节
+4       1     FRAME_SEQ                  每成功发送一帧加 1，uint8 循环
+5       1     STATUS                     设备有效和过期状态
+
+6       1     TOF1_ID                    固定 0x01
+7~8     2     TOF1_FILTERED_MM           uint16，大端
+9~10    2     TOF1_MIN3_RAW_MM           uint16，大端
+11~12   2     TOF1_SAMPLE_SEQ            uint16，大端
+13~14   2     TOF1_SAMPLE_AGE_MS         uint16，大端
+
+15      1     TOF2_ID                    固定 0x02
+16~17   2     TOF2_FILTERED_MM           uint16，大端
+18~19   2     TOF2_MIN3_RAW_MM           uint16，大端
+20~21   2     TOF2_SAMPLE_SEQ            uint16，大端
+22~23   2     TOF2_SAMPLE_AGE_MS         uint16，大端
+
+24      1     K230_1_ID                  固定 0x11
+25~26   2     K230_1_CENTER_X             int16，大端，像素
+27~28   2     K230_1_CENTER_Y             int16，大端，像素
+29~30   2     K230_1_X_ROTATION           uint16，大端，实际角度=值/100 度
+31~32   2     K230_1_Y_ROTATION           uint16，大端，实际角度=值/100 度
+33~34   2     K230_1_SAMPLE_SEQ           uint16，大端
+35~36   2     K230_1_SAMPLE_AGE_MS        uint16，大端
+
+37      1     K230_2_ID                  固定 0x12
+38~39   2     K230_2_CENTER_X             int16，大端，像素
+40~41   2     K230_2_CENTER_Y             int16，大端，像素
+42~43   2     K230_2_X_ROTATION           uint16，大端，实际角度=值/100 度
+44~45   2     K230_2_Y_ROTATION           uint16，大端，实际角度=值/100 度
+46~47   2     K230_2_SAMPLE_SEQ           uint16，大端
+48~49   2     K230_2_SAMPLE_AGE_MS        uint16，大端
+
+50~51   2     CRC16                      CRC-16/CCITT-FALSE，大端
+
+所有多字节字段均为大端模式。
+
+
+3. STATUS 定义
+
+bit0：TOF1_VALID
+bit1：TOF2_VALID
+bit2：K230_1_VALID
+bit3：K230_2_VALID
+bit4：TOF1_STALE
+bit5：TOF2_STALE
+bit6：K230_1_STALE
+bit7：K230_2_STALE
+
+VALID=1 表示设备已连续获得 3 个有效新样本，当前过滤结果可以使用。
+STALE=1 表示从未获得有效样本，或最后一个有效样本已经超过 stale 时间。
+
+状态组合：
+
+VALID=0, STALE=1：未初始化、无目标、断线或数据已经过期。
+VALID=0, STALE=0：正在恢复，已经收到新样本但尚未累计满 3 个。
+VALID=1, STALE=0：当前数据可信。
+VALID=1, STALE=1：C552 不发送该组合；H743 收到时按无效处理。
+
+K230 无目标时不发送数据，因此超过 150 ms 后表现为 VALID=0、STALE=1。
+这是“当前无可用目标数据”，不代表 K230 通信链路故障，H743 不应因此触发整车故障。
+
+
+4. TOF 字段定义
+
+TOF 原始有效范围为 0~1600 mm，范围外的响应不更新过滤器、sample_seq 和 sample_age。
+
+FILTERED_MM：3 点中值滤波后再执行 EMA 的结果，用于正常抓取距离计算。
+
+MIN3_RAW_MM：最近 3 个有效原始测量值的最小值，用作保守的近距离辅助通道。
+该字段不能替代正常的 FILTERED_MM。窗口不足 3 个样本时不置 VALID；stale 后清空窗口。
+
+设备从未获得可信结果时，FILTERED_MM 和 MIN3_RAW_MM 均填 0xFFFF。
+设备 stale 后允许保留最后结果用于诊断，但 H743 必须以 STATUS 为准，不得继续控制使用。
+
+
+5. K230 字段定义
+
+K230 原始帧每次识别到目标时发送一帧；无目标时不发送。
+
+CENTER_X、CENTER_Y 使用普通 3 点中值和 EMA。写入 int16 前执行四舍五入和饱和处理。
+
+X_ROTATION 表示上下方向旋转，Y_ROTATION 表示左右方向旋转。
+X_ROTATION、Y_ROTATION 的编码范围为 0~35999，对应 0.00~359.99 度。
+两个角度都可能跨越 0/360 度边界，C552 必须使用最短环形角差执行中值和 EMA。
+输入值 36000 等价于 0，其他整数角度也应归一化到 0~35999。
+
+K230 从未获得可信结果时，坐标和角度字段填 0。stale 后允许保留最后过滤结果，
+但 H743 必须以 STATUS 为准。
+
+
+6. SAMPLE_SEQ 和 SAMPLE_AGE_MS
+
+每个逻辑设备独立维护 uint16 SAMPLE_SEQ。只在接受一帧有效的新传感器响应时加 1，
+不能因 C552 重复发送快照而增加。达到 65535 后回到 0。
+
+SAMPLE_AGE_MS 是发送快照时距最后一个有效新样本的毫秒数，最大饱和为 65535。
+从未收到有效样本时填 0xFFFF。
+
+FRAME_SEQ 只描述 C552 输出帧顺序，不能代替设备 SAMPLE_SEQ。
+
+
+7. CRC16
+
+算法：CRC-16/CCITT-FALSE
+poly：0x1021
+init：0xFFFF
+refin：false
+refout：false
+xorout：0x0000
+
+校验范围为偏移 2~49，即 VERSION、PAYLOAD_LEN 和完整 payload。
+CRC 高字节写入偏移 50，低字节写入偏移 51。帧头和 CRC 字段本身不参与计算。
+
+
+8. H743 接收要求
+
+1）在连续字节流中搜索 0xAA 0x55。
+2）检查 VERSION=0x02、PAYLOAD_LEN=0x2E。
+3）等待完整 52 字节。
+4）检查四个固定设备 ID。
+5）校验 CRC16。
+6）校验通过后检查 FRAME_SEQ、VALID、STALE、SAMPLE_SEQ 和 SAMPLE_AGE_MS。
+7）只有 VALID=1 且 STALE=0 的设备数据可以进入正常控制。
+
+H743 必须支持拆包、粘包、丢字节、前导杂字节和 CRC 错误后的重新同步。
+
+
+9. 固定常量
+
+FRAME_HEADER_1       = 0xAA
+FRAME_HEADER_2       = 0x55
+FRAME_VERSION        = 0x02
+FRAME_PAYLOAD_LENGTH = 0x2E
+FRAME_LENGTH         = 52
+UART_BAUDRATE        = 460800
+SEND_PERIOD_MS       = 20
+TOF_STALE_MS         = 500
+K230_STALE_MS        = 150
+TOF_RESPONSE_TIMEOUT = 500
