@@ -33,7 +33,10 @@ typedef enum {
 } GripperPosition;
 
 MotionAuxResult ZAxis_MoveRelative(int32_t pulses, uint32_t speed_hz);
+MotionAuxResult ZAxis_MoveAbsolute(int32_t target_pulses, uint32_t speed_hz);
 MotionAuxResult ZAxis_Stop(void);
+MotionAuxResult ZAxis_SetZero(void);
+MotionAuxResult ZAxis_ClearFault(void);
 MotionAuxResult Gripper_SetPosition(GripperPosition position);
 
 #ifdef __cplusplus

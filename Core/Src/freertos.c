@@ -38,6 +38,9 @@
 #include "vision_calibration.h"
 #include "xy_motor.h"
 #include "xy_vision_align.h"
+#include "z_axis_link.h"
+#include "z_axis.h"
+#include "xz_vision_calibration.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
@@ -181,6 +184,8 @@ void MX_FREERTOS_Init(void) {
     Error_Handler();
   }
   XY_Motor_Init(HAL_GetTick());
+  ZAxis_Init(HAL_GetTick());
+  XZCalibration_Init(HAL_GetTick());
   VisionCalibration_Init(HAL_GetTick());
   XY_VisionAlign_Init(HAL_GetTick());
 
@@ -292,9 +297,13 @@ static void StartLegacyIoTask(void *argument)
   {
     USART3_RxPoll();
     C552_Poll(HAL_GetTick());
+    UART4_RxPoll();
+    ZAxisLink_Poll(HAL_GetTick());
 
     if (osMutexAcquire(canAccessMutexHandle, 0U) == osOK)
     {
+      ZAxis_Poll(HAL_GetTick());
+      XZCalibration_Poll(HAL_GetTick());
       can_rx_timeout_check();
       can_recovery_poll();
       if (g_can_rx_frame.frame_done != 0U)

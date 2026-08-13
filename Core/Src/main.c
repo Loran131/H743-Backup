@@ -34,6 +34,7 @@
 #include "systick.h"
 #include <stdio.h>
 #include "shell.h"
+#include "z_axis_link.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -106,6 +107,11 @@ int main(void)
   MX_I2C2_Init();
   MX_QUADSPI_Init();
   /* USER CODE BEGIN 2 */
+  ZAxisLink_Init(HAL_GetTick());
+  if (UART4_StartRx() != HAL_OK)
+  {
+    printf("Z axis UART4 RX DMA start failed; retry scheduled\r\n");
+  }
   C552_Init(HAL_GetTick());
   if (USART3_StartRx() != HAL_OK)
   {

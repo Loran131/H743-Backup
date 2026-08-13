@@ -1,6 +1,8 @@
 #include "motion_interfaces.h"
 #include "c552.h"
 #include "main.h"
+#include "z_axis_link.h"
+#include "z_axis.h"
 
 XY_VisionCalibration g_xy_vision_calibration = {
     .k230_id = 0U,
@@ -13,13 +15,54 @@ XY_VisionCalibration g_xy_vision_calibration = {
 
 MotionAuxResult ZAxis_MoveRelative(int32_t pulses, uint32_t speed_hz)
 {
-    (void)pulses;
-    (void)speed_hz;
+    ZAxisControlResult result = ZAxisControl_MoveRelative(pulses, speed_hz);
+    if (result == Z_RESULT_OK) return MOTION_AUX_OK;
+    if (result == Z_RESULT_BUSY) return MOTION_AUX_BUSY;
+    if ((result == Z_RESULT_INVALID_PULSES) ||
+        (result == Z_RESULT_INVALID_SPEED) ||
+        (result == Z_RESULT_SOFT_LIMIT) ||
+        (result == Z_RESULT_NOT_REFERENCED)) {
+        return MOTION_AUX_INVALID_ARGUMENT;
+    }
+    return MOTION_AUX_NOT_AVAILABLE;
+}
+
+MotionAuxResult ZAxis_MoveAbsolute(int32_t target_pulses, uint32_t speed_hz)
+{
+    ZAxisControlResult result =
+        ZAxisControl_MoveAbsolute(target_pulses, speed_hz);
+    if (result == Z_RESULT_OK) return MOTION_AUX_OK;
+    if (result == Z_RESULT_BUSY) return MOTION_AUX_BUSY;
+    if ((result == Z_RESULT_INVALID_PULSES) ||
+        (result == Z_RESULT_INVALID_SPEED) ||
+        (result == Z_RESULT_SOFT_LIMIT) ||
+        (result == Z_RESULT_NOT_REFERENCED)) {
+        return MOTION_AUX_INVALID_ARGUMENT;
+    }
     return MOTION_AUX_NOT_AVAILABLE;
 }
 
 MotionAuxResult ZAxis_Stop(void)
 {
+    ZAxisControlResult result = ZAxisControl_Stop();
+    if (result == Z_RESULT_OK) return MOTION_AUX_OK;
+    if (result == Z_RESULT_BUSY) return MOTION_AUX_BUSY;
+    return MOTION_AUX_NOT_AVAILABLE;
+}
+
+MotionAuxResult ZAxis_SetZero(void)
+{
+    ZAxisControlResult result = ZAxisControl_SetZero();
+    if (result == Z_RESULT_OK) return MOTION_AUX_OK;
+    if (result == Z_RESULT_BUSY) return MOTION_AUX_BUSY;
+    return MOTION_AUX_NOT_AVAILABLE;
+}
+
+MotionAuxResult ZAxis_ClearFault(void)
+{
+    ZAxisControlResult result = ZAxisControl_ClearFault();
+    if (result == Z_RESULT_OK) return MOTION_AUX_OK;
+    if (result == Z_RESULT_BUSY) return MOTION_AUX_BUSY;
     return MOTION_AUX_NOT_AVAILABLE;
 }
 

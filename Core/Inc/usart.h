@@ -39,6 +39,8 @@ extern UART_HandleTypeDef huart3;
 extern UART_HandleTypeDef huart4;
 
 extern DMA_HandleTypeDef hdma_usart3_rx;
+extern DMA_HandleTypeDef hdma_uart4_rx;
+extern DMA_HandleTypeDef hdma_uart4_tx;
 
 /* USER CODE BEGIN Private defines */
 
@@ -57,6 +59,9 @@ char *CLI_GetLine(void);
 HAL_StatusTypeDef USART3_StartRx(void);
 void USART3_RxPoll(void);
 HAL_StatusTypeDef USART3_TransmitAsync(const uint8_t *data, uint16_t length);
+HAL_StatusTypeDef UART4_TransmitDMA(const uint8_t *data, uint16_t length);
+HAL_StatusTypeDef UART4_StartRx(void);
+void UART4_RxPoll(void);
 
 /* USER CODE END Prototypes */
 

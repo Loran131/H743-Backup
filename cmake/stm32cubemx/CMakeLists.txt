@@ -57,6 +57,9 @@ set(MX_Application_Src
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/vision_calibration.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/xy_vision_align.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/motion_interfaces.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/z_axis_link.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/z_axis.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/xz_vision_calibration.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/shell.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/eeprom.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/led.c

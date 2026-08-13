@@ -69,7 +69,7 @@ static XY_AxisConfig g_xy_config[XY_AXIS_COUNT] = {
         .home_direction = XY_NEGATIVE_DIRECTION,
         /* Y mechanics require a deliberately low sensorless-homing speed. */
         .home_speed_rpm = 10U,
-        .home_current_ma = 600,
+        .home_current_ma = 500,
         .home_timeout_ms = 30000U
     }
 };

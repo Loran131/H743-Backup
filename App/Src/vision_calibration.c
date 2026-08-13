@@ -741,6 +741,11 @@ uint8_t VisionCalibration_ManualMotionAllowed(void)
             (g_cal.state == VISION_CAL_FAULT)) ? 1U : 0U;
 }
 
+uint8_t VisionCalibration_IsActive(void)
+{
+    return vision_state_active(g_cal.state);
+}
+
 const char *VisionCalibration_StateString(VisionCalibrationState state)
 {
     static const char *const names[] = {

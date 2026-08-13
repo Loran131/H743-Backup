@@ -93,6 +93,7 @@ uint8_t VisionCalibration_SetInverse(uint8_t k230_id,
 void VisionCalibration_Abort(void);
 void VisionCalibration_GetStatus(VisionCalibrationStatus *status);
 uint8_t VisionCalibration_ManualMotionAllowed(void);
+uint8_t VisionCalibration_IsActive(void);
 const char *VisionCalibration_StateString(VisionCalibrationState state);
 const char *VisionCalibration_FaultString(VisionCalibrationFault fault);
 const char *VisionCalibration_StorageStateString(
