@@ -54,6 +54,8 @@ set(MX_Application_Src
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/c552.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/smd.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/xy_motor.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/vision_calibration.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/xy_vision_align.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/motion_interfaces.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/shell.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/eeprom.c

@@ -1,14 +1,13 @@
 #include "motion_interfaces.h"
+#include "c552.h"
+#include "main.h"
 
 XY_VisionCalibration g_xy_vision_calibration = {
-    .center_x_target = 0,
-    .center_y_target = 0,
-    .center_x_axis = XY_AXIS_X,
-    .center_y_axis = XY_AXIS_Y,
-    .center_x_error_to_positive_axis = 0,
-    .center_y_error_to_positive_axis = 0,
-    .center_x_pixels_per_mm = 0.0f,
-    .center_y_pixels_per_mm = 0.0f,
+    .k230_id = 0U,
+    .axes = {XY_AXIS_X, XY_AXIS_Y},
+    .reference_pixel = {0, 0},
+    .pixel_per_pulse = {{0.0f, 0.0f}, {0.0f, 0.0f}},
+    .pulse_per_pixel = {{0.0f, 0.0f}, {0.0f, 0.0f}},
     .calibrated = 0U
 };
 
@@ -26,8 +25,15 @@ MotionAuxResult ZAxis_Stop(void)
 
 MotionAuxResult Gripper_SetPosition(GripperPosition position)
 {
+    C552_RequestResult result;
     if ((position != GRIPPER_OPEN) && (position != GRIPPER_CLOSED)) {
         return MOTION_AUX_INVALID_ARGUMENT;
     }
-    return MOTION_AUX_NOT_AVAILABLE;
+    result = C552_SetGripper(C552_GRIPPER_BOTH,
+                             (position == GRIPPER_OPEN) ?
+                                 C552_GRIPPER_OPEN : C552_GRIPPER_CLOSED,
+                             HAL_GetTick());
+    if (result == C552_REQUEST_OK) return MOTION_AUX_OK;
+    if (result == C552_REQUEST_BUSY) return MOTION_AUX_BUSY;
+    return MOTION_AUX_INVALID_ARGUMENT;
 }

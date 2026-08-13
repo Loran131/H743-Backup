@@ -35,7 +35,9 @@
 #include "shell.h"
 #include "smd.h"
 #include "usart.h"
+#include "vision_calibration.h"
 #include "xy_motor.h"
+#include "xy_vision_align.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
@@ -179,6 +181,8 @@ void MX_FREERTOS_Init(void) {
     Error_Handler();
   }
   XY_Motor_Init(HAL_GetTick());
+  VisionCalibration_Init(HAL_GetTick());
+  XY_VisionAlign_Init(HAL_GetTick());
 
   /* USER CODE END Init */
 
@@ -308,6 +312,8 @@ static void StartLegacyIoTask(void *argument)
         smd_process_response(response, response_length);
       }
       XY_Motor_Poll(HAL_GetTick());
+      VisionCalibration_Poll(HAL_GetTick());
+      XY_VisionAlign_Poll(HAL_GetTick());
       (void)osMutexRelease(canAccessMutexHandle);
     }
     CriticalTaskBeat(HEALTH_LEGACY_IO_TASK);

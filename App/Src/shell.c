@@ -15,6 +15,8 @@
 #include "usart.h"
 #include "c552.h"
 #include "xy_motor.h"
+#include "vision_calibration.h"
+#include "xy_vision_align.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -27,6 +29,9 @@ static const char *g_help_text =
     "  cans             CAN state and recovery counters\r\n"
     "  canprobe [addr]  scan PD42S1 CAN ID 0x1000..0x100F\r\n"
     "  C552             show C552 link, sensors and RX counters\r\n"
+    "  k1_mode <tag|red>  request K230_1 mode, wait for APPLIED\r\n"
+    "  grip <open|close>  test both C552 gripper channels\r\n"
+    "  c552_req <mask>    set required sensor mask (0..0x1F)\r\n"
     "--------------------------------------------------\r\n"
     " X/Y CONTROL (signed pulses, + = away from zero):\r\n"
     "  x_move <delta> [rpm] [acc]   safeguarded relative move\r\n"
@@ -36,6 +41,11 @@ static const char *g_help_text =
     "  x_home / y_home               MANUAL sensorless homing\r\n"
     "  x_zero / y_zero               MANUAL current-position zero\r\n"
     "  x_clear / y_clear             clear control-layer fault\r\n"
+    "  p2_start [k230] [xstep] [ystep]  start XY vision calibration\r\n"
+    "  p2_status / p2_ref / p2_abort    inspect, capture reference, abort\r\n"
+    "  p2_save / p2_load / p2_reset     manage EEPROM calibration\r\n"
+    "  p2_set <k230> <refx> <refy> <i00> <i01> <i10> <i11>\r\n"
+    "  align_start / align_status / align_abort  XY visual alignment\r\n"
     "--------------------------------------------------\r\n"
     " LOW-LEVEL MOTOR:\r\n"
     "  pos_rel  [addr] <dir> <acc> <speed> <pulses>\r\n"
@@ -116,6 +126,9 @@ static void cmd_factory(int argc, char *argv[]);
 static void cmd_can_status(int argc, char *argv[]);
 static void cmd_can_probe(int argc, char *argv[]);
 static void cmd_c552(int argc, char *argv[]);
+static void cmd_k1_mode(int argc, char *argv[]);
+static void cmd_grip(int argc, char *argv[]);
+static void cmd_c552_required(int argc, char *argv[]);
 static void cmd_x_move(int argc, char *argv[]);
 static void cmd_y_move(int argc, char *argv[]);
 static void cmd_xy_stop(int argc, char *argv[]);
@@ -126,11 +139,25 @@ static void cmd_x_zero(int argc, char *argv[]);
 static void cmd_y_zero(int argc, char *argv[]);
 static void cmd_x_clear(int argc, char *argv[]);
 static void cmd_y_clear(int argc, char *argv[]);
+static void cmd_p2_start(int argc, char *argv[]);
+static void cmd_p2_status(int argc, char *argv[]);
+static void cmd_p2_ref(int argc, char *argv[]);
+static void cmd_p2_abort(int argc, char *argv[]);
+static void cmd_p2_save(int argc, char *argv[]);
+static void cmd_p2_load(int argc, char *argv[]);
+static void cmd_p2_reset(int argc, char *argv[]);
+static void cmd_p2_set(int argc, char *argv[]);
+static void cmd_align_start(int argc, char *argv[]);
+static void cmd_align_status(int argc, char *argv[]);
+static void cmd_align_abort(int argc, char *argv[]);
 
 static const ShellCmd_t g_cmd_table[] = {
     {"cans",      "",           1, cmd_can_status},
     {"canprobe",  "[addr]",     1, cmd_can_probe},
     {"C552",      "",           1, cmd_c552},
+    {"k1_mode",   "<tag|red>",  2, cmd_k1_mode},
+    {"grip",      "<open|close>", 2, cmd_grip},
+    {"c552_req",  "<mask>",     2, cmd_c552_required},
     {"x_move",    "<delta_pulses> [rpm] [acc]", 2, cmd_x_move},
     {"y_move",    "<delta_pulses> [rpm] [acc]", 2, cmd_y_move},
     {"xy_stop",    "",           1, cmd_xy_stop},
@@ -141,6 +168,17 @@ static const ShellCmd_t g_cmd_table[] = {
     {"y_zero",     "",           1, cmd_y_zero},
     {"x_clear",    "",           1, cmd_x_clear},
     {"y_clear",    "",           1, cmd_y_clear},
+    {"p2_start",   "[k230=1|2] [xstep=51200] [ystep=12800]", 1, cmd_p2_start},
+    {"p2_status",  "",           1, cmd_p2_status},
+    {"p2_ref",     "",           1, cmd_p2_ref},
+    {"p2_abort",   "",           1, cmd_p2_abort},
+    {"p2_save",    "",           1, cmd_p2_save},
+    {"p2_load",    "",           1, cmd_p2_load},
+    {"p2_reset",   "",           1, cmd_p2_reset},
+    {"p2_set", "<k230> <refx> <refy> <i00> <i01> <i10> <i11>", 8, cmd_p2_set},
+    {"align_start", "",          1, cmd_align_start},
+    {"align_status", "",         1, cmd_align_status},
+    {"align_abort", "",          1, cmd_align_abort},
     /* Motion */
     {"pos_rel",   "<addr> <dir> <acc> <speed> <pulses>", 6, cmd_pos_rel},
     {"pos_abs",   "<addr> <dir> <acc> <speed> <pulses>", 6, cmd_pos_abs},
@@ -266,20 +304,18 @@ static void c552_print_cdeg(uint16_t value)
 }
 
 static void c552_print_tof(const char *name, uint8_t device_bit,
-                           const C552_TofData *sensor, const C552_Data *data,
+                           const C552_TofData *sensor,
                            const C552_Health *health)
 {
-    uint8_t stale_bit = (uint8_t)(device_bit << 4);
-
-    if ((data->status & device_bit) == 0U) {
+    if ((health->valid_mask & device_bit) == 0U) {
         printf("  %s: INVALID%s (value ignored)\r\n", name,
-               ((data->status & stale_bit) != 0U) ? " STALE" : "");
+               ((health->stale_mask & device_bit) != 0U) ? " STALE" : "");
         return;
     }
 
     printf("  %s: VALID %s filtered=%u mm min3=%u mm sample_seq=%u "
            "sample_age=%u ms%s%s\r\n", name,
-           ((data->status & stale_bit) != 0U) ? "STALE" : "FRESH",
+           ((health->stale_mask & device_bit) != 0U) ? "STALE" : "FRESH",
            (unsigned int)sensor->filtered_mm,
            (unsigned int)sensor->min3_raw_mm,
            (unsigned int)sensor->sample_seq,
@@ -291,19 +327,16 @@ static void c552_print_tof(const char *name, uint8_t device_bit,
 
 static void c552_print_k230(const char *name, uint8_t device_bit,
                             const C552_K230Data *sensor,
-                            const C552_Data *data,
                             const C552_Health *health)
 {
-    uint8_t stale_bit = (uint8_t)(device_bit << 4);
-
-    if ((data->status & device_bit) == 0U) {
+    if ((health->valid_mask & device_bit) == 0U) {
         printf("  %s: INVALID%s (value ignored)\r\n", name,
-               ((data->status & stale_bit) != 0U) ? " STALE" : "");
+               ((health->stale_mask & device_bit) != 0U) ? " STALE" : "");
         return;
     }
 
     printf("  %s: VALID %s center=(%d,%d) rotation=(", name,
-           ((data->status & stale_bit) != 0U) ? "STALE" : "FRESH",
+           ((health->stale_mask & device_bit) != 0U) ? "STALE" : "FRESH",
            (int)sensor->center_x, (int)sensor->center_y);
     c552_print_cdeg(sensor->x_rotation_cdeg);
     printf(",");
@@ -321,6 +354,7 @@ static void cmd_c552(int argc, char *argv[])
     C552_Data data;
     C552_Health health;
     C552_Diagnostics diagnostics;
+    C552_CommandStatus command_status;
     uint8_t has_snapshot;
     uint32_t age = 0U;
 
@@ -328,6 +362,7 @@ static void cmd_c552(int argc, char *argv[])
     (void)argv;
     has_snapshot = C552_GetSnapshot(&data, &health);
     C552_GetDiagnostics(&diagnostics);
+    C552_GetCommandStatus(&command_status);
     if (has_snapshot) {
         age = HAL_GetTick() - health.last_valid_frame_tick;
     }
@@ -346,19 +381,23 @@ static void cmd_c552(int argc, char *argv[])
     if (!has_snapshot) {
         printf("  No valid frame received.\r\n");
     } else {
-        printf("  seq=%u status=0x%02X age=%lu ms invalid=0x%02X stale=0x%02X\r\n",
+        printf("  V3.1 seq=%u status=0x%02X tof3_flags=0x%02X age=%lu ms "
+               "valid=0x%02X invalid=0x%02X stale=0x%02X\r\n",
                (unsigned int)data.seq, (unsigned int)data.status,
+               (unsigned int)data.tof3_flags,
                (unsigned long)age,
+               (unsigned int)health.valid_mask,
                (unsigned int)health.sensor_invalid_mask,
                (unsigned int)health.sensor_stale_mask);
         c552_print_tof("TOF1", C552_DEVICE_TOF1, &data.tof1,
-                       &data, &health);
+                       &health);
         c552_print_tof("TOF2", C552_DEVICE_TOF2, &data.tof2,
-                       &data, &health);
+                       &health);
         c552_print_k230("K230_1", C552_DEVICE_K230_1, &data.k230_1,
-                        &data, &health);
+                        &health);
         c552_print_k230("K230_2", C552_DEVICE_K230_2, &data.k230_2,
-                        &data, &health);
+                        &health);
+        c552_print_tof("TOF3", C552_DEVICE_TOF3, &data.tof3, &health);
     }
 
     printf("  RX bytes=%lu valid=%lu ver_err=%lu len_err=%lu id_err=%lu "
@@ -369,6 +408,26 @@ static void cmd_c552(int argc, char *argv[])
            (unsigned long)diagnostics.length_errors,
            (unsigned long)diagnostics.id_errors,
            (unsigned long)diagnostics.crc_errors);
+    printf("  ACK valid=%lu format_err=%lu unexpected=%lu "
+           "TX[cmd=%lu done=%lu start_err=%lu err=%lu timeout=%lu]\r\n",
+           (unsigned long)diagnostics.valid_ack_frames,
+           (unsigned long)diagnostics.ack_format_errors,
+           (unsigned long)diagnostics.unexpected_acks,
+           (unsigned long)diagnostics.tx_commands,
+           (unsigned long)diagnostics.tx_completed,
+           (unsigned long)diagnostics.tx_start_errors,
+           (unsigned long)diagnostics.tx_errors,
+           (unsigned long)diagnostics.command_timeouts);
+    printf("  CMD state=%s id=0x%02X cmd=0x%02X seq=0x%02X request=0x%02X "
+           "result=0x%02X(%s) response=0x%02X\r\n",
+           C552_CommandStateString(command_status.state),
+           (unsigned int)command_status.id,
+           (unsigned int)command_status.command,
+           (unsigned int)command_status.sequence,
+           (unsigned int)command_status.requested_value,
+           (unsigned int)command_status.result,
+           C552_AckResultString(command_status.result),
+           (unsigned int)command_status.response_value);
     printf("  seq_gap=%lu duplicate=%lu UART[ORE=%lu FE=%lu NE=%lu PE=%lu] "
            "DMA[err=%lu restart_fail=%lu]\r\n",
            (unsigned long)diagnostics.sequence_gaps,
@@ -379,6 +438,63 @@ static void cmd_c552(int argc, char *argv[])
            (unsigned long)diagnostics.uart_pe_errors,
            (unsigned long)diagnostics.dma_errors,
            (unsigned long)diagnostics.dma_restart_failures);
+}
+
+static void cmd_k1_mode(int argc, char *argv[])
+{
+    C552_K230Mode mode;
+    C552_RequestResult result;
+    (void)argc;
+
+    if (strcmp(argv[1], "tag") == 0) {
+        mode = C552_K230_MODE_APRILTAG;
+    } else if (strcmp(argv[1], "red") == 0) {
+        mode = C552_K230_MODE_RED_BLOCK;
+    } else {
+        printf("Usage: k1_mode <tag|red>\r\n");
+        return;
+    }
+    result = C552_SetK230Mode(C552_ID_K230_1, mode, HAL_GetTick());
+    printf("[C552] K230_1 mode=%u request=%s; final success requires "
+           "CMD state=APPLIED\r\n",
+           (unsigned int)mode,
+           (result == C552_REQUEST_OK) ? "QUEUED" :
+               ((result == C552_REQUEST_BUSY) ? "BUSY" : "INVALID"));
+}
+
+static void cmd_grip(int argc, char *argv[])
+{
+    C552_GripperState state;
+    C552_RequestResult result;
+    (void)argc;
+
+    if (strcmp(argv[1], "open") == 0) {
+        state = C552_GRIPPER_OPEN;
+    } else if (strcmp(argv[1], "close") == 0) {
+        state = C552_GRIPPER_CLOSED;
+    } else {
+        printf("Usage: grip <open|close>\r\n");
+        return;
+    }
+    result = C552_SetGripper(C552_GRIPPER_BOTH, state, HAL_GetTick());
+    printf("[C552] gripper=%u request=%s; final success requires "
+           "CMD state=APPLIED\r\n",
+           (unsigned int)state,
+           (result == C552_REQUEST_OK) ? "QUEUED" :
+               ((result == C552_REQUEST_BUSY) ? "BUSY" : "INVALID"));
+}
+
+static void cmd_c552_required(int argc, char *argv[])
+{
+    unsigned long mask;
+    (void)argc;
+    mask = strtoul(argv[1], NULL, 0);
+    if ((mask > C552_DEVICE_ALL) ||
+        (C552_SetRequiredMask((uint8_t)mask) == 0U)) {
+        printf("Usage: c552_req <0..0x1F>\r\n");
+        return;
+    }
+    printf("[C552] required mask=0x%02lX\r\n", mask);
 }
 
 /* ====================== MOTION COMMANDS =================================== */
@@ -392,7 +508,13 @@ static void cmd_xy_move_axis(XY_Axis axis, int argc, char *argv[])
     uint8_t acceleration = (argc > 3) ?
                            (uint8_t)strtoul(argv[3], NULL, 0) :
                            config->acceleration;
-    XY_Result result = XY_MoveRelative(axis, delta, speed, acceleration);
+    XY_Result result;
+    if ((VisionCalibration_ManualMotionAllowed() == 0U) ||
+        (XY_VisionAlign_IsActive() != 0U)) {
+        printf("[XY] automatic operation owns X/Y; abort it first\r\n");
+        return;
+    }
+    result = XY_MoveRelative(axis, delta, speed, acceleration);
     printf("[%c] move delta=%ld speed=%u acc=%u: %s\r\n",
            (axis == XY_AXIS_X) ? 'X' : 'Y', (long)delta,
            (unsigned int)speed, (unsigned int)acceleration,
@@ -413,27 +535,58 @@ static void cmd_xy_stop(int argc, char *argv[])
 {
     (void)argc;
     (void)argv;
-    xy_stop_all();
+    XY_VisionAlign_Abort();
+    if (VisionCalibration_ManualMotionAllowed() == 0U) {
+        VisionCalibration_Abort();
+    } else {
+        VisionCalibration_Abort();
+        xy_stop_all();
+    }
     printf("[XY] stop requested for both axes\r\n");
 }
 
 static void cmd_xy_status(int argc, char *argv[])
 {
+    XY_StartupStatus startup;
     (void)argc;
     (void)argv;
+    XY_GetStartupStatus(&startup);
+    printf("[XY] startup=%s replies=0x%02X elapsed=%lu ms\r\n",
+           XY_StartupStateString(startup.state),
+           (unsigned int)startup.response_mask,
+           (unsigned long)((startup.finish_tick != 0U ? startup.finish_tick :
+                            HAL_GetTick()) - startup.start_tick));
     for (uint8_t i = 0U; i < XY_AXIS_COUNT; ++i) {
         XY_AxisStatus status;
         const XY_AxisConfig *config = XY_GetConfig((XY_Axis)i);
         (void)XY_GetStatus((XY_Axis)i, &status);
-        printf("[%c] addr=%u state=%s fault=%u ref=%u pos=%ld target=%ld "
-               "rpm=%d arrived=%u limits=%ld..%ld age=%lu\r\n",
+        uint32_t completion_ms = (status.completion_tick != 0U) ?
+                                 status.completion_tick - status.command_tick : 0U;
+        printf("[%c] addr=%u state=%s fault=%u(%s) ref=%u pos=%ld target=%ld "
+               "rpm=%d arrived=%u replied=%u limits=%ld..%ld age=%lu "
+               "last_cmd=0x%02X completion=%s/%lu ms releases=A%lu/S%lu "
+               "reply_age=A%lu/S%lu fault_cmd=0x%02X home_stage=%u retries=%u\r\n",
                (i == XY_AXIS_X) ? 'X' : 'Y', config->motor_address,
                XY_StateString(status.state), (unsigned int)status.fault,
+               XY_FaultString(status.fault),
                status.position_valid, (long)status.position_pulses,
                (long)status.target_pulses, (int)status.speed_rpm,
-               status.arrived, (long)config->soft_min_pulses,
+               status.arrived, status.response_seen,
+               (long)config->soft_min_pulses,
                (long)config->soft_max_pulses,
-               (unsigned long)(HAL_GetTick() - status.last_feedback_tick));
+               (unsigned long)(HAL_GetTick() - status.last_feedback_tick),
+               (unsigned int)status.last_command_function,
+               XY_CompletionSourceString(status.completion_source),
+               (unsigned long)completion_ms,
+               (unsigned long)status.arrived_release_count,
+               (unsigned long)status.static_release_count,
+               (unsigned long)(status.last_arrived_reply_tick != 0U ?
+                   HAL_GetTick() - status.last_arrived_reply_tick : 0U),
+               (unsigned long)(status.last_static_reply_tick != 0U ?
+                   HAL_GetTick() - status.last_static_reply_tick : 0U),
+               (unsigned int)status.fault_function,
+               (unsigned int)status.fault_home_stage,
+               (unsigned int)status.home_retry_count);
     }
 }
 
@@ -447,6 +600,11 @@ static void cmd_xy_manual_result(XY_Axis axis, const char *action,
 static void cmd_x_home(int argc, char *argv[])
 {
     (void)argc; (void)argv;
+    if ((VisionCalibration_ManualMotionAllowed() == 0U) ||
+        (XY_VisionAlign_IsActive() != 0U)) {
+        printf("[XY] automatic operation owns X/Y; abort it first\r\n");
+        return;
+    }
     cmd_xy_manual_result(XY_AXIS_X, "MANUAL sensorless home",
                          XY_HomeSensorless(XY_AXIS_X));
 }
@@ -454,6 +612,11 @@ static void cmd_x_home(int argc, char *argv[])
 static void cmd_y_home(int argc, char *argv[])
 {
     (void)argc; (void)argv;
+    if ((VisionCalibration_ManualMotionAllowed() == 0U) ||
+        (XY_VisionAlign_IsActive() != 0U)) {
+        printf("[XY] automatic operation owns X/Y; abort it first\r\n");
+        return;
+    }
     cmd_xy_manual_result(XY_AXIS_Y, "MANUAL sensorless home",
                          XY_HomeSensorless(XY_AXIS_Y));
 }
@@ -461,6 +624,11 @@ static void cmd_y_home(int argc, char *argv[])
 static void cmd_x_zero(int argc, char *argv[])
 {
     (void)argc; (void)argv;
+    if ((VisionCalibration_ManualMotionAllowed() == 0U) ||
+        (XY_VisionAlign_IsActive() != 0U)) {
+        printf("[XY] automatic operation owns X/Y; abort it first\r\n");
+        return;
+    }
     cmd_xy_manual_result(XY_AXIS_X, "MANUAL set zero",
                          XY_SetCurrentPositionAsZero(XY_AXIS_X));
 }
@@ -468,6 +636,11 @@ static void cmd_x_zero(int argc, char *argv[])
 static void cmd_y_zero(int argc, char *argv[])
 {
     (void)argc; (void)argv;
+    if ((VisionCalibration_ManualMotionAllowed() == 0U) ||
+        (XY_VisionAlign_IsActive() != 0U)) {
+        printf("[XY] automatic operation owns X/Y; abort it first\r\n");
+        return;
+    }
     cmd_xy_manual_result(XY_AXIS_Y, "MANUAL set zero",
                          XY_SetCurrentPositionAsZero(XY_AXIS_Y));
 }
@@ -482,6 +655,195 @@ static void cmd_y_clear(int argc, char *argv[])
 {
     (void)argc; (void)argv;
     cmd_xy_manual_result(XY_AXIS_Y, "clear fault", XY_ClearFault(XY_AXIS_Y));
+}
+
+static void p2_print_float6(float value)
+{
+    int32_t scaled = (int32_t)(value * 1000000.0f);
+    uint32_t magnitude;
+    if (scaled < 0) {
+        printf("-");
+        magnitude = (uint32_t)(-(int64_t)scaled);
+    } else {
+        magnitude = (uint32_t)scaled;
+    }
+    printf("%lu.%06lu", (unsigned long)(magnitude / 1000000U),
+           (unsigned long)(magnitude % 1000000U));
+}
+
+static void cmd_p2_status(int argc, char *argv[])
+{
+    VisionCalibrationStatus status;
+    (void)argc; (void)argv;
+    VisionCalibration_GetStatus(&status);
+    printf("[P2] storage=%s generation=%lu runtime_calibrated=%u\r\n",
+           VisionCalibration_StorageStateString(status.storage_state),
+           (unsigned long)status.storage_generation,
+           (unsigned int)status.result.valid);
+    printf("[P2] state=%s fault=%s k230=%u samples=%u seq=%u "
+           "pos=(%ld,%ld) base=(%ld,%ld) step=(%ld,%ld) pixel=(%d,%d)\r\n",
+           VisionCalibration_StateString(status.state),
+           VisionCalibration_FaultString(status.fault),
+           (unsigned int)((status.k230_id == VISION_CAL_K230_2_ID) ? 2U : 1U),
+           (unsigned int)status.sample_count,
+           (unsigned int)status.last_sample_seq,
+           (long)status.position_pulses[0], (long)status.position_pulses[1],
+           (long)status.base_pulses[0], (long)status.base_pulses[1],
+           (long)status.step_pulses[0], (long)status.step_pulses[1],
+           (int)status.latest_pixel[0], (int)status.latest_pixel[1]);
+    printf("[P2] J pixel/pulse=[[ ");
+    p2_print_float6(status.result.pixel_per_pulse[0][0]); printf(", ");
+    p2_print_float6(status.result.pixel_per_pulse[0][1]); printf(" ], [ ");
+    p2_print_float6(status.result.pixel_per_pulse[1][0]); printf(", ");
+    p2_print_float6(status.result.pixel_per_pulse[1][1]);
+    printf(" ]] valid=%u ref=(%d,%d)\r\n", status.result.valid,
+           (int)status.result.reference_pixel[0],
+           (int)status.result.reference_pixel[1]);
+    printf("[P2] J^-1 pulse/pixel=[[ ");
+    p2_print_float6(status.result.pulse_per_pixel[0][0]); printf(", ");
+    p2_print_float6(status.result.pulse_per_pixel[0][1]); printf(" ], [ ");
+    p2_print_float6(status.result.pulse_per_pixel[1][0]); printf(", ");
+    p2_print_float6(status.result.pulse_per_pixel[1][1]); printf(" ]]\r\n");
+}
+
+static void cmd_p2_start(int argc, char *argv[])
+{
+    unsigned long k230 = (argc > 1) ? strtoul(argv[1], NULL, 0) : 1UL;
+    long x_step = (argc > 2) ? strtol(argv[2], NULL, 0) : 51200L;
+    long y_step = (argc > 3) ? strtol(argv[3], NULL, 0) : 12800L;
+    uint8_t id = (k230 == 2UL) ? VISION_CAL_K230_2_ID :
+                 ((k230 == 1UL) ? VISION_CAL_K230_1_ID : 0U);
+    if ((XY_VisionAlign_IsActive() != 0U) || (id == 0U) ||
+        (VisionCalibration_Start(id, (int32_t)x_step, (int32_t)y_step,
+                                 HAL_GetTick()) == 0U)) {
+        printf("[P2] start rejected: require valid arguments and both axes "
+               "referenced/IDLE after startup homing\r\n");
+        return;
+    }
+    printf("[P2] started K230_%lu: xstep=%ld ystep=%ld pulses\r\n",
+           k230, x_step, y_step);
+}
+
+static void cmd_p2_ref(int argc, char *argv[])
+{
+    VisionCalibrationStatus p2;
+    XY_AxisStatus x;
+    XY_AxisStatus y;
+    (void)argc; (void)argv;
+    if (VisionCalibration_CaptureReference(HAL_GetTick()) == 0U) {
+        VisionCalibration_GetStatus(&p2);
+        (void)XY_GetStatus(XY_AXIS_X, &x);
+        (void)XY_GetStatus(XY_AXIS_Y, &y);
+        printf("[P2] reference rejected: state=%s fault=%s matrix_valid=%u "
+               "X=%s Y=%s; require successful calibration state "
+               "MANUAL_ALIGN\r\n",
+               VisionCalibration_StateString(p2.state),
+               VisionCalibration_FaultString(p2.fault),
+               (unsigned int)p2.result.valid,
+               XY_StateString(x.state), XY_StateString(y.state));
+    } else {
+        printf("[P2] reference queued; waiting for both axes IDLE\r\n");
+    }
+}
+
+static void cmd_p2_abort(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    VisionCalibration_Abort();
+    printf("[P2] aborted\r\n");
+}
+
+static void cmd_p2_save(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    printf("[P2] EEPROM save: %s\r\n",
+           VisionCalibration_Save() ? "OK" : "FAILED");
+}
+
+static void cmd_p2_load(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    printf("[P2] EEPROM load: %s\r\n",
+           VisionCalibration_Load() ? "OK" : "FAILED");
+}
+
+static void cmd_p2_reset(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    printf("[P2] EEPROM reset: %s\r\n",
+           VisionCalibration_ResetStored() ? "OK" : "FAILED");
+}
+
+static void cmd_p2_set(int argc, char *argv[])
+{
+    unsigned long k230 = strtoul(argv[1], NULL, 0);
+    long reference_x = strtol(argv[2], NULL, 0);
+    long reference_y = strtol(argv[3], NULL, 0);
+    float inverse[2][2];
+    uint8_t id;
+    (void)argc;
+
+    id = (k230 == 1UL) ? VISION_CAL_K230_1_ID :
+         ((k230 == 2UL) ? VISION_CAL_K230_2_ID : 0U);
+    if ((id == 0U) || (reference_x < INT16_MIN) ||
+        (reference_x > INT16_MAX) || (reference_y < INT16_MIN) ||
+        (reference_y > INT16_MAX)) {
+        printf("[P2] set rejected: invalid K230 or reference pixel\r\n");
+        return;
+    }
+    inverse[0][0] = strtof(argv[4], NULL);
+    inverse[0][1] = strtof(argv[5], NULL);
+    inverse[1][0] = strtof(argv[6], NULL);
+    inverse[1][1] = strtof(argv[7], NULL);
+    printf("[P2] set inverse and EEPROM save: %s\r\n",
+           VisionCalibration_SetInverse(id, (int16_t)reference_x,
+                                        (int16_t)reference_y, inverse) ?
+               "OK" : "FAILED");
+}
+
+static void cmd_align_start(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    if (VisionCalibration_ManualMotionAllowed() == 0U) {
+        printf("[ALIGN] rejected: P2 calibration active\r\n");
+        return;
+    }
+    printf("[ALIGN] start: %s, period=%lu ms\r\n",
+           XY_VisionAlign_Start(HAL_GetTick()) ? "OK" : "REJECTED",
+           (unsigned long)XY_VISION_ALIGN_PERIOD_MS);
+}
+
+static void cmd_align_status(int argc, char *argv[])
+{
+    XY_VisionAlignStatus status;
+    (void)argc; (void)argv;
+    XY_VisionAlign_GetStatus(&status);
+    printf("[ALIGN] state=%s fault=%s seq=%u pixel=(%d,%d) error=(%d,%d) "
+           "step=(%ld,%ld) stable=%u corrections=%lu sample_age=%lu ms\r\n",
+           XY_VisionAlign_StateString(status.state),
+           XY_VisionAlign_FaultString(status.fault),
+           (unsigned int)status.last_sample_seq,
+           (int)status.pixel[0], (int)status.pixel[1],
+           (int)status.error_pixel[0], (int)status.error_pixel[1],
+           (long)status.requested_pulses[0],
+           (long)status.requested_pulses[1],
+           (unsigned int)status.stable_samples,
+           (unsigned long)status.corrections,
+           (unsigned long)(HAL_GetTick() - status.last_sample_tick));
+    printf("[ALIGN] last_move=%s axis=%c pos=(%ld,%ld) target=(%ld,%ld)\r\n",
+           XY_ResultString(status.last_move_result),
+           (status.failed_axis == XY_AXIS_X) ? 'X' :
+               ((status.failed_axis == XY_AXIS_Y) ? 'Y' : '-'),
+           (long)status.axis_position[0], (long)status.axis_position[1],
+           (long)status.attempted_target[0],
+           (long)status.attempted_target[1]);
+}
+
+static void cmd_align_abort(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    XY_VisionAlign_Abort();
+    printf("[ALIGN] aborted\r\n");
 }
 
 static void cmd_pos_rel(int argc, char *argv[])

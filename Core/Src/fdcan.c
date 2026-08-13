@@ -61,7 +61,6 @@ static void can_request_recovery(uint32_t reason)
 /* TX header (reused for all sends) */
 static FDCAN_TxHeaderTypeDef g_tx_header;
 
-#if CAN_INTERNAL_LOOPBACK_TEST
 static uint8_t can_read_fifo0_message(FDCAN_HandleTypeDef *hfdcan)
 {
     FDCAN_RxHeaderTypeDef rx_header;
@@ -104,7 +103,6 @@ static uint8_t can_read_fifo0_message(FDCAN_HandleTypeDef *hfdcan)
     g_can_rx_frame.last_rx_tick = HAL_GetTick();
     return 1U;
 }
-#endif
 
 /* ====================== INITIALIZATION ==================================== */
 
@@ -437,6 +435,13 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 
         /* Record reception time for idle timeout */
         g_can_rx_frame.last_rx_tick = HAL_GetTick();
+
+        /* A long SMD response may already have more fragments queued. The
+         * RX-new-message interrupt is edge-like here, so drain FIFO now. */
+        while (HAL_FDCAN_GetRxFifoFillLevel(hfdcan, FDCAN_RX_FIFO0) > 0U)
+        {
+            if (can_read_fifo0_message(hfdcan) == 0U) break;
+        }
     }
 
     if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_MESSAGE_LOST) != RESET)
@@ -458,8 +463,8 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
  */
 void can_rx_timeout_check(void)
 {
-#if CAN_INTERNAL_LOOPBACK_TEST
-    /* Polling provides a diagnostic path independent of the RX interrupt. */
+    /* A later fragment can enter FIFO just after the RX callback exits
+     * without producing another callback edge, so polling also drains it. */
     while (HAL_FDCAN_GetRxFifoFillLevel(&hfdcan2, FDCAN_RX_FIFO0) > 0U)
     {
         if (!can_read_fifo0_message(&hfdcan2))
@@ -467,7 +472,6 @@ void can_rx_timeout_check(void)
             break;
         }
     }
-#endif
 
     if (g_can_rx_frame.len > 0 && !g_can_rx_frame.frame_done)
     {

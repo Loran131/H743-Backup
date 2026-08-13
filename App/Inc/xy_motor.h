@@ -14,6 +14,7 @@ extern "C" {
 #define XY_CONTROL_PERIOD_MS        20U
 #define XY_FEEDBACK_TIMEOUT_MS      250U
 #define XY_MOVE_TIMEOUT_MS          30000U
+#define XY_STARTUP_REPLY_TIMEOUT_MS 2000U
 
 typedef enum {
     XY_AXIS_X = 0,
@@ -55,6 +56,26 @@ typedef enum {
     XY_FAULT_STOP_UNCONFIRMED
 } XY_Fault;
 
+typedef enum {
+    XY_COMPLETION_NONE = 0,
+    XY_COMPLETION_ARRIVED,
+    XY_COMPLETION_STATIC,
+    XY_COMPLETION_STOP_ACK,
+    XY_COMPLETION_ZERO_ACK,
+    XY_COMPLETION_HOME
+} XY_CompletionSource;
+
+typedef enum {
+    XY_STARTUP_WAITING_REPLIES = 0,
+    XY_STARTUP_WAITING_TO_HOME_X,
+    XY_STARTUP_HOMING_X,
+    XY_STARTUP_WAITING_TO_HOME_Y,
+    XY_STARTUP_HOMING_Y,
+    XY_STARTUP_COMPLETE,
+    XY_STARTUP_SKIPPED_NO_REPLY,
+    XY_STARTUP_FAILED
+} XY_StartupState;
+
 typedef struct {
     uint8_t motor_address;
     uint8_t positive_direction;
@@ -79,9 +100,27 @@ typedef struct {
     uint8_t position_valid;
     uint8_t arrived;
     uint8_t motor_status;
+    uint8_t response_seen;
+    uint8_t last_command_function;
+    uint8_t fault_function;
+    uint8_t fault_home_stage;
+    uint8_t home_retry_count;
     uint32_t command_tick;
     uint32_t last_feedback_tick;
+    uint32_t completion_tick;
+    uint32_t last_arrived_reply_tick;
+    uint32_t last_static_reply_tick;
+    uint32_t arrived_release_count;
+    uint32_t static_release_count;
+    XY_CompletionSource completion_source;
 } XY_AxisStatus;
+
+typedef struct {
+    XY_StartupState state;
+    uint8_t response_mask;
+    uint32_t start_tick;
+    uint32_t finish_tick;
+} XY_StartupStatus;
 
 void XY_Motor_Init(uint32_t now);
 void XY_Motor_Poll(uint32_t now);
@@ -94,7 +133,8 @@ XY_Result XY_MoveAbsolute(XY_Axis axis, int32_t target_pulses,
 void XY_Stop(XY_Axis axis);
 void xy_stop_all(void);
 
-/* Both functions are manual-only. Neither is called by init or recovery. */
+/* Homing is also used once by the reply-gated startup sequence. Fault recovery
+ * never starts homing automatically. SetCurrentPositionAsZero is manual-only. */
 XY_Result XY_HomeSensorless(XY_Axis axis);
 XY_Result XY_SetCurrentPositionAsZero(XY_Axis axis);
 XY_Result XY_ClearFault(XY_Axis axis);
@@ -105,8 +145,12 @@ XY_Result XY_SetDefaultSpeed(XY_Axis axis, uint16_t speed_rpm);
 const XY_AxisConfig *XY_GetConfig(XY_Axis axis);
 uint8_t XY_GetStatus(XY_Axis axis, XY_AxisStatus *status);
 uint8_t XY_AllIdle(void);
+void XY_GetStartupStatus(XY_StartupStatus *status);
 const char *XY_ResultString(XY_Result result);
 const char *XY_StateString(XY_State state);
+const char *XY_FaultString(XY_Fault fault);
+const char *XY_CompletionSourceString(XY_CompletionSource source);
+const char *XY_StartupStateString(XY_StartupState state);
 
 #ifdef __cplusplus
 }

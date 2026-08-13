@@ -415,6 +415,20 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
   g_usart3_rx_last_restart_tick = HAL_GetTick();
 }
 
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART3)
+  {
+    C552_OnTxComplete(HAL_GetTick());
+  }
+}
+
+HAL_StatusTypeDef USART3_TransmitAsync(const uint8_t *data, uint16_t length)
+{
+  if ((data == NULL) || (length == 0U)) return HAL_ERROR;
+  return HAL_UART_Transmit_IT(&huart3, data, length);
+}
+
 HAL_StatusTypeDef USART3_StartRx(void)
 {
   HAL_StatusTypeDef status;

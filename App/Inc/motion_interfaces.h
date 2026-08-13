@@ -9,14 +9,11 @@ extern "C" {
 #include <stdint.h>
 
 typedef struct {
-    int16_t center_x_target;
-    int16_t center_y_target;
-    XY_Axis center_x_axis;
-    XY_Axis center_y_axis;
-    int8_t center_x_error_to_positive_axis;
-    int8_t center_y_error_to_positive_axis;
-    float center_x_pixels_per_mm;
-    float center_y_pixels_per_mm;
+    uint8_t k230_id;
+    XY_Axis axes[2];
+    int16_t reference_pixel[2];
+    float pixel_per_pulse[2][2];
+    float pulse_per_pixel[2][2];
     uint8_t calibrated;
 } XY_VisionCalibration;
 
@@ -26,7 +23,8 @@ extern XY_VisionCalibration g_xy_vision_calibration;
 typedef enum {
     MOTION_AUX_OK = 0,
     MOTION_AUX_NOT_AVAILABLE,
-    MOTION_AUX_INVALID_ARGUMENT
+    MOTION_AUX_INVALID_ARGUMENT,
+    MOTION_AUX_BUSY
 } MotionAuxResult;
 
 typedef enum {
