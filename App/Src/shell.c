@@ -18,9 +18,11 @@
 #include "vision_calibration.h"
 #include "xy_vision_align.h"
 #include "motion_interfaces.h"
+#include "motion_coordinator.h"
 #include "z_axis_link.h"
 #include "z_axis.h"
 #include "xz_vision_calibration.h"
+#include "xz_vision_align.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -37,6 +39,8 @@ static const char *g_help_text =
     "  k2_mode <tag|red>  request K230_2 mode, wait for APPLIED\r\n"
     "  grip <open|close>  test both C552 gripper channels\r\n"
     "  c552_req <mask>    set required sensor mask (0..0x1F)\r\n"
+    "  motion_status / xyz_snapshot  coordinator and valid XYZ snapshot\r\n"
+    "  abort / motion_resume         unified stop and explicit re-arm\r\n"
     "--------------------------------------------------\r\n"
     " X/Y CONTROL (signed pulses, + = away from zero):\r\n"
     "  x_move <delta> [rpm] [acc]   safeguarded relative move\r\n"
@@ -54,13 +58,13 @@ static const char *g_help_text =
     "  p3_status / p3_ref / p3_abort         inspect, capture reference, abort\r\n"
     "  p3_save / p3_load / p3_reset          manage XZ calibration EEPROM\r\n"
     "  align_start / align_status / align_abort  XY visual alignment\r\n"
+    "  p4_start / p4_status / p4_abort          K230_2 red XZ alignment\r\n"
     "--------------------------------------------------\r\n"
     " Z CONTROL (signed pulses, + = away from zero):\r\n"
     "  z_zero                            set current position to zero\r\n"
     "  z_move <delta_pulses> [speed_hz]  relative move / unreferenced jog\r\n"
     "  z_stop                            emergency stop\r\n"
-    "  z_clear                           clear fault; zero is required again\r\n"
-    "  z_status                          link and motor state\r\n"
+    "  z_status                          show state and auto-recovery counters\r\n"
     "--------------------------------------------------\r\n"
     " LOW-LEVEL MOTOR:\r\n"
     "  pos_rel  [addr] <dir> <acc> <speed> <pulses>\r\n"
@@ -82,6 +86,7 @@ static const char *g_help_text =
     "  ma       [addr]     -- phase current (mA)\r\n"
     "  ver      [addr]     -- firmware version\r\n"
     "  clog     [addr]     -- stall flag\r\n"
+    "  clog_cur [addr]     -- stall protection current\r\n"
     "  pos_err  [addr]     -- position error\r\n"
     "  total    [addr]     -- total pulses\r\n"
     "  sys      [addr]     -- system params\r\n"
@@ -91,6 +96,7 @@ static const char *g_help_text =
     "  set_can_id  [addr] <can_id>\r\n"
     "  set_mode    [addr] <mode>\r\n"
     "  set_ma      [addr] <ma>\r\n"
+    "  set_clog_cur <addr> <ma>  -- temporary, 1..3000 mA\r\n"
     "  param_save  [addr]\r\n"
     "------------------------------------------------\r\n"
     " SYSTEM:\r\n"
@@ -127,6 +133,7 @@ static void cmd_read_vol(int argc, char *argv[]);
 static void cmd_read_ma(int argc, char *argv[]);
 static void cmd_read_ver(int argc, char *argv[]);
 static void cmd_read_clog(int argc, char *argv[]);
+static void cmd_read_clog_cur(int argc, char *argv[]);
 static void cmd_read_pos_err(int argc, char *argv[]);
 static void cmd_read_total(int argc, char *argv[]);
 static void cmd_read_sys(int argc, char *argv[]);
@@ -134,6 +141,7 @@ static void cmd_set_addr(int argc, char *argv[]);
 static void cmd_set_can_id(int argc, char *argv[]);
 static void cmd_set_mode(int argc, char *argv[]);
 static void cmd_set_ma(int argc, char *argv[]);
+static void cmd_set_clog_cur(int argc, char *argv[]);
 static void cmd_param_save(int argc, char *argv[]);
 static void cmd_restart(int argc, char *argv[]);
 static void cmd_cal(int argc, char *argv[]);
@@ -173,11 +181,17 @@ static void cmd_p3_abort(int argc, char *argv[]);
 static void cmd_p3_save(int argc, char *argv[]);
 static void cmd_p3_load(int argc, char *argv[]);
 static void cmd_p3_reset(int argc, char *argv[]);
+static void cmd_p4_start(int argc, char *argv[]);
+static void cmd_p4_status(int argc, char *argv[]);
+static void cmd_p4_abort(int argc, char *argv[]);
 static void cmd_z_move(int argc, char *argv[]);
 static void cmd_z_zero(int argc, char *argv[]);
 static void cmd_z_stop(int argc, char *argv[]);
-static void cmd_z_clear(int argc, char *argv[]);
 static void cmd_z_status(int argc, char *argv[]);
+static void cmd_motion_status(int argc, char *argv[]);
+static void cmd_abort(int argc, char *argv[]);
+static void cmd_motion_resume(int argc, char *argv[]);
+static void cmd_xyz_snapshot(int argc, char *argv[]);
 
 static const ShellCmd_t g_cmd_table[] = {
     {"cans",      "",           1, cmd_can_status},
@@ -215,11 +229,17 @@ static const ShellCmd_t g_cmd_table[] = {
     {"align_start", "",          1, cmd_align_start},
     {"align_status", "",         1, cmd_align_status},
     {"align_abort", "",          1, cmd_align_abort},
+    {"p4_start",    "",          1, cmd_p4_start},
+    {"p4_status",   "",          1, cmd_p4_status},
+    {"p4_abort",    "",          1, cmd_p4_abort},
     {"z_zero",     "",          1, cmd_z_zero},
     {"z_move",     "<delta_pulses> [speed_hz=90000]", 2, cmd_z_move},
     {"z_stop",     "",          1, cmd_z_stop},
-    {"z_clear",    "",          1, cmd_z_clear},
     {"z_status",   "",          1, cmd_z_status},
+    {"motion_status", "",       1, cmd_motion_status},
+    {"abort",        "",        1, cmd_abort},
+    {"motion_resume", "",       1, cmd_motion_resume},
+    {"xyz_snapshot", "",        1, cmd_xyz_snapshot},
     /* Motion */
     {"pos_rel",   "<addr> <dir> <acc> <speed> <pulses>", 6, cmd_pos_rel},
     {"pos_abs",   "<addr> <dir> <acc> <speed> <pulses>", 6, cmd_pos_abs},
@@ -239,6 +259,7 @@ static const ShellCmd_t g_cmd_table[] = {
     {"ma",        "[addr]", 1, cmd_read_ma},
     {"ver",       "[addr]", 1, cmd_read_ver},
     {"clog",      "[addr]", 1, cmd_read_clog},
+    {"clog_cur",  "[addr]", 1, cmd_read_clog_cur},
     {"pos_err",   "[addr]", 1, cmd_read_pos_err},
     {"total",     "[addr]", 1, cmd_read_total},
     {"sys",       "[addr]", 1, cmd_read_sys},
@@ -247,6 +268,7 @@ static const ShellCmd_t g_cmd_table[] = {
     {"set_can_id",  "<addr> <can_id>",    3, cmd_set_can_id},
     {"set_mode",    "<addr> <mode>",      3, cmd_set_mode},
     {"set_ma",      "<addr> <ma>",        3, cmd_set_ma},
+    {"set_clog_cur", "<addr> <ma>",       3, cmd_set_clog_cur},
     {"param_save",  "[addr]",             1, cmd_param_save},
     /* System */
     {"restart",   "[addr]", 1, cmd_restart},
@@ -314,6 +336,21 @@ static uint8_t get_addr(int argc, char *argv[], int pos)
         return (val > 0 && val <= 255) ? (uint8_t)val : 1;
     }
     return 1;
+}
+
+static uint8_t shell_acquire_manual(uint8_t hold)
+{
+    if (MotionCoordinator_Acquire(MOTION_OWNER_MANUAL, 0U,
+                                  HAL_GetTick()) == 0U) {
+        MotionCoordinatorStatus status;
+        MotionCoordinator_GetStatus(&status);
+        printf("[MOTION] rejected: owner=%s latch=%s\r\n",
+               MotionCoordinator_OwnerString(status.owner),
+               MotionCoordinator_LatchString(status.latch_reason));
+        return 0U;
+    }
+    MotionCoordinator_SetManualHold(hold);
+    return 1U;
 }
 
 static void cmd_can_status(int argc, char *argv[])
@@ -486,6 +523,7 @@ static void cmd_k1_mode(int argc, char *argv[])
     C552_K230Mode mode;
     C552_RequestResult result;
     (void)argc;
+    if (shell_acquire_manual(0U) == 0U) return;
 
     if (strcmp(argv[1], "tag") == 0) {
         mode = C552_K230_MODE_APRILTAG;
@@ -508,10 +546,12 @@ static void cmd_k2_mode(int argc, char *argv[])
     C552_K230Mode mode;
     C552_RequestResult result;
     (void)argc;
+    if (shell_acquire_manual(0U) == 0U) return;
 
     if ((VisionCalibration_IsActive() != 0U) ||
         (XZCalibration_IsActive() != 0U) ||
-        (XY_VisionAlign_IsActive() != 0U)) {
+        (XY_VisionAlign_IsActive() != 0U) ||
+        (XZVisionAlign_IsActive() != 0U)) {
         printf("[C552] K230_2 mode rejected: visual operation active\r\n");
         return;
     }
@@ -545,6 +585,11 @@ static void cmd_grip(int argc, char *argv[])
         printf("Usage: grip <open|close>\r\n");
         return;
     }
+    if (shell_acquire_manual(0U) == 0U) return;
+    if (MotionCoordinator_IsGripperFrozen() != 0U) {
+        printf("[C552] gripper frozen until motion_resume\r\n");
+        return;
+    }
     result = C552_SetGripper(C552_GRIPPER_BOTH, state, HAL_GetTick());
     printf("[C552] gripper=%u request=%s; final success requires "
            "CMD state=APPLIED\r\n",
@@ -559,7 +604,7 @@ static void cmd_c552_required(int argc, char *argv[])
     (void)argc;
     mask = strtoul(argv[1], NULL, 0);
     if ((mask > C552_DEVICE_ALL) ||
-        (C552_SetRequiredMask((uint8_t)mask) == 0U)) {
+        (MotionCoordinator_SetIdleRequiredMask((uint8_t)mask) == 0U)) {
         printf("Usage: c552_req <0..0x1F>\r\n");
         return;
     }
@@ -578,10 +623,12 @@ static void cmd_xy_move_axis(XY_Axis axis, int argc, char *argv[])
                            (uint8_t)strtoul(argv[3], NULL, 0) :
                            config->acceleration;
     XY_Result result;
+    if (shell_acquire_manual(0U) == 0U) return;
     if ((VisionCalibration_ManualMotionAllowed() == 0U) ||
         (XZCalibration_ManualMotionAllowed() == 0U) ||
         ((axis == XY_AXIS_Y) && (XZCalibration_IsActive() != 0U)) ||
-        (XY_VisionAlign_IsActive() != 0U)) {
+        (XY_VisionAlign_IsActive() != 0U) ||
+        (XZVisionAlign_IsActive() != 0U)) {
         printf("[XY] automatic operation owns X/Y; abort it first\r\n");
         return;
     }
@@ -606,28 +653,28 @@ static void cmd_xy_stop(int argc, char *argv[])
 {
     (void)argc;
     (void)argv;
-    XY_VisionAlign_Abort();
-    XZCalibration_Abort();
-    if (VisionCalibration_ManualMotionAllowed() == 0U) {
-        VisionCalibration_Abort();
-    } else {
-        VisionCalibration_Abort();
-        xy_stop_all();
-    }
-    printf("[XY] stop requested for both axes\r\n");
+    MotionCoordinator_RequestAbort();
+    printf("[MOTION] unified X/Y/Z stop published\r\n");
 }
 
 static void cmd_xy_status(int argc, char *argv[])
 {
     XY_StartupStatus startup;
+    XY_StopDiagnostics stops;
     (void)argc;
     (void)argv;
     XY_GetStartupStatus(&startup);
+    XY_GetStopDiagnostics(&stops);
     printf("[XY] startup=%s replies=0x%02X elapsed=%lu ms\r\n",
            XY_StartupStateString(startup.state),
            (unsigned int)startup.response_mask,
            (unsigned long)((startup.finish_tick != 0U ? startup.finish_tick :
                             HAL_GetTick()) - startup.start_tick));
+    printf("[XY] stop_tx fault_broadcast=%lu api=%lu stop_all=%lu "
+           "(raw motor_stop not counted)\r\n",
+           (unsigned long)stops.fault_broadcast_count,
+           (unsigned long)stops.stop_api_count,
+           (unsigned long)stops.stop_all_count);
     for (uint8_t i = 0U; i < XY_AXIS_COUNT; ++i) {
         XY_AxisStatus status;
         const XY_AxisConfig *config = XY_GetConfig((XY_Axis)i);
@@ -636,7 +683,7 @@ static void cmd_xy_status(int argc, char *argv[])
                                  status.completion_tick - status.command_tick : 0U;
         printf("[%c] addr=%u state=%s fault=%u(%s) ref=%u pos=%ld target=%ld "
                "rpm=%d arrived=%u replied=%u limits=%ld..%ld age=%lu "
-               "last_cmd=0x%02X completion=%s/%lu ms releases=A%lu/S%lu "
+               "last_cmd=0x%02X completion=%s/%lu ms releases=A%lu/S%lu/T%lu "
                "reply_age=A%lu/S%lu fault_cmd=0x%02X home_stage=%u retries=%u\r\n",
                (i == XY_AXIS_X) ? 'X' : 'Y', config->motor_address,
                XY_StateString(status.state), (unsigned int)status.fault,
@@ -652,6 +699,7 @@ static void cmd_xy_status(int argc, char *argv[])
                (unsigned long)completion_ms,
                (unsigned long)status.arrived_release_count,
                (unsigned long)status.static_release_count,
+               (unsigned long)status.tolerance_release_count,
                (unsigned long)(status.last_arrived_reply_tick != 0U ?
                    HAL_GetTick() - status.last_arrived_reply_tick : 0U),
                (unsigned long)(status.last_static_reply_tick != 0U ?
@@ -672,9 +720,11 @@ static void cmd_xy_manual_result(XY_Axis axis, const char *action,
 static void cmd_x_home(int argc, char *argv[])
 {
     (void)argc; (void)argv;
+    if (shell_acquire_manual(0U) == 0U) return;
     if ((VisionCalibration_ManualMotionAllowed() == 0U) ||
         (XZCalibration_IsActive() != 0U) ||
-        (XY_VisionAlign_IsActive() != 0U)) {
+        (XY_VisionAlign_IsActive() != 0U) ||
+        (XZVisionAlign_IsActive() != 0U)) {
         printf("[XY] automatic operation owns X/Y; abort it first\r\n");
         return;
     }
@@ -685,9 +735,11 @@ static void cmd_x_home(int argc, char *argv[])
 static void cmd_y_home(int argc, char *argv[])
 {
     (void)argc; (void)argv;
+    if (shell_acquire_manual(0U) == 0U) return;
     if ((VisionCalibration_ManualMotionAllowed() == 0U) ||
         (XZCalibration_IsActive() != 0U) ||
-        (XY_VisionAlign_IsActive() != 0U)) {
+        (XY_VisionAlign_IsActive() != 0U) ||
+        (XZVisionAlign_IsActive() != 0U)) {
         printf("[XY] automatic operation owns X/Y; abort it first\r\n");
         return;
     }
@@ -698,9 +750,11 @@ static void cmd_y_home(int argc, char *argv[])
 static void cmd_x_zero(int argc, char *argv[])
 {
     (void)argc; (void)argv;
+    if (shell_acquire_manual(0U) == 0U) return;
     if ((VisionCalibration_ManualMotionAllowed() == 0U) ||
         (XZCalibration_IsActive() != 0U) ||
-        (XY_VisionAlign_IsActive() != 0U)) {
+        (XY_VisionAlign_IsActive() != 0U) ||
+        (XZVisionAlign_IsActive() != 0U)) {
         printf("[XY] automatic operation owns X/Y; abort it first\r\n");
         return;
     }
@@ -711,9 +765,11 @@ static void cmd_x_zero(int argc, char *argv[])
 static void cmd_y_zero(int argc, char *argv[])
 {
     (void)argc; (void)argv;
+    if (shell_acquire_manual(0U) == 0U) return;
     if ((VisionCalibration_ManualMotionAllowed() == 0U) ||
         (XZCalibration_IsActive() != 0U) ||
-        (XY_VisionAlign_IsActive() != 0U)) {
+        (XY_VisionAlign_IsActive() != 0U) ||
+        (XZVisionAlign_IsActive() != 0U)) {
         printf("[XY] automatic operation owns X/Y; abort it first\r\n");
         return;
     }
@@ -724,8 +780,8 @@ static void cmd_y_zero(int argc, char *argv[])
 static void cmd_x_clear(int argc, char *argv[])
 {
     (void)argc; (void)argv;
-    if (XZCalibration_IsActive() != 0U) {
-        printf("[X] rejected: P3 calibration active\r\n");
+    if (MotionCoordinator_GetOwner() != MOTION_OWNER_NONE) {
+        printf("[X] clear rejected: motion owner active\r\n");
         return;
     }
     cmd_xy_manual_result(XY_AXIS_X, "clear fault", XY_ClearFault(XY_AXIS_X));
@@ -734,25 +790,47 @@ static void cmd_x_clear(int argc, char *argv[])
 static void cmd_y_clear(int argc, char *argv[])
 {
     (void)argc; (void)argv;
-    if (XZCalibration_IsActive() != 0U) {
-        printf("[Y] rejected: P3 calibration active\r\n");
+    if (MotionCoordinator_GetOwner() != MOTION_OWNER_NONE) {
+        printf("[Y] clear rejected: motion owner active\r\n");
         return;
     }
     cmd_xy_manual_result(XY_AXIS_Y, "clear fault", XY_ClearFault(XY_AXIS_Y));
 }
 
+static void shell_print_float(float value, uint8_t precision)
+{
+    uint32_t integer;
+    uint32_t fraction;
+    uint32_t scale = (precision == 9U) ? 1000000000U : 1000000U;
+
+    if (value != value) {
+        printf("nan");
+        return;
+    }
+    if (value < 0.0f) {
+        printf("-");
+        value = -value;
+    }
+    if (value > 4294967040.0f) {
+        printf("overflow");
+        return;
+    }
+    integer = (uint32_t)value;
+    fraction = (uint32_t)(((value - (float)integer) * (float)scale) + 0.5f);
+    if (fraction >= scale) {
+        ++integer;
+        fraction = 0U;
+    }
+    if (precision == 9U) {
+        printf("%lu.%09lu", (unsigned long)integer, (unsigned long)fraction);
+    } else {
+        printf("%lu.%06lu", (unsigned long)integer, (unsigned long)fraction);
+    }
+}
+
 static void p2_print_float6(float value)
 {
-    int32_t scaled = (int32_t)(value * 1000000.0f);
-    uint32_t magnitude;
-    if (scaled < 0) {
-        printf("-");
-        magnitude = (uint32_t)(-(int64_t)scaled);
-    } else {
-        magnitude = (uint32_t)scaled;
-    }
-    printf("%lu.%06lu", (unsigned long)(magnitude / 1000000U),
-           (unsigned long)(magnitude % 1000000U));
+    shell_print_float(value, 6U);
 }
 
 static void cmd_p2_status(int argc, char *argv[])
@@ -798,7 +876,8 @@ static void cmd_p2_start(int argc, char *argv[])
     uint8_t id = (k230 == 2UL) ? VISION_CAL_K230_2_ID :
                  ((k230 == 1UL) ? VISION_CAL_K230_1_ID : 0U);
     if ((XZCalibration_IsActive() != 0U) ||
-        (XY_VisionAlign_IsActive() != 0U) || (id == 0U) ||
+        (XY_VisionAlign_IsActive() != 0U) ||
+        (XZVisionAlign_IsActive() != 0U) || (id == 0U) ||
         (VisionCalibration_Start(id, (int32_t)x_step, (int32_t)y_step,
                                  HAL_GetTick()) == 0U)) {
         printf("[P2] start rejected: require valid arguments and both axes "
@@ -834,8 +913,8 @@ static void cmd_p2_ref(int argc, char *argv[])
 static void cmd_p2_abort(int argc, char *argv[])
 {
     (void)argc; (void)argv;
-    VisionCalibration_Abort();
-    printf("[P2] aborted\r\n");
+    MotionCoordinator_RequestAbort();
+    printf("[MOTION] P2 ABORT published\r\n");
 }
 
 static void cmd_p2_save(int argc, char *argv[])
@@ -890,7 +969,8 @@ static void cmd_align_start(int argc, char *argv[])
 {
     (void)argc; (void)argv;
     if ((VisionCalibration_IsActive() != 0U) ||
-        (XZCalibration_IsActive() != 0U)) {
+        (XZCalibration_IsActive() != 0U) ||
+        (XZVisionAlign_IsActive() != 0U)) {
         printf("[ALIGN] rejected: calibration active\r\n");
         return;
     }
@@ -928,8 +1008,8 @@ static void cmd_align_status(int argc, char *argv[])
 static void cmd_align_abort(int argc, char *argv[])
 {
     (void)argc; (void)argv;
-    XY_VisionAlign_Abort();
-    printf("[ALIGN] aborted\r\n");
+    MotionCoordinator_RequestAbort();
+    printf("[MOTION] XY ALIGN ABORT published\r\n");
 }
 
 static void cmd_p3_start(int argc, char *argv[])
@@ -1001,16 +1081,18 @@ static void cmd_p3_status(int argc, char *argv[])
            (int)status.result.reference_pixel[1],
            VisionCalibration_StorageStateString(status.storage_state),
            (unsigned long)status.storage_generation);
-    printf("[P3] J=[[%.9f, %.9f], [%.9f, %.9f]]\r\n",
-           (double)status.result.pixel_per_pulse[0][0],
-           (double)status.result.pixel_per_pulse[0][1],
-           (double)status.result.pixel_per_pulse[1][0],
-           (double)status.result.pixel_per_pulse[1][1]);
-    printf("[P3] inv=[[%.6f, %.6f], [%.6f, %.6f]]\r\n",
-           (double)status.result.pulse_per_pixel[0][0],
-           (double)status.result.pulse_per_pixel[0][1],
-           (double)status.result.pulse_per_pixel[1][0],
-           (double)status.result.pulse_per_pixel[1][1]);
+    printf("[P3] J pixel/pulse=[[ ");
+    shell_print_float(status.result.pixel_per_pulse[0][0], 9U); printf(", ");
+    shell_print_float(status.result.pixel_per_pulse[0][1], 9U); printf(" ], [ ");
+    shell_print_float(status.result.pixel_per_pulse[1][0], 9U); printf(", ");
+    shell_print_float(status.result.pixel_per_pulse[1][1], 9U);
+    printf(" ]]\r\n");
+    printf("[P3] J^-1 pulse/pixel=[[ ");
+    shell_print_float(status.result.pulse_per_pixel[0][0], 6U); printf(", ");
+    shell_print_float(status.result.pulse_per_pixel[0][1], 6U); printf(" ], [ ");
+    shell_print_float(status.result.pulse_per_pixel[1][0], 6U); printf(", ");
+    shell_print_float(status.result.pulse_per_pixel[1][1], 6U);
+    printf(" ]]\r\n");
 }
 
 static void cmd_p3_ref(int argc, char *argv[])
@@ -1024,15 +1106,16 @@ static void cmd_p3_ref(int argc, char *argv[])
 static void cmd_p3_abort(int argc, char *argv[])
 {
     (void)argc; (void)argv;
-    XZCalibration_Abort();
-    printf("[P3] aborted\r\n");
+    MotionCoordinator_RequestAbort();
+    printf("[MOTION] P3 ABORT published\r\n");
 }
 
 static void cmd_p3_save(int argc, char *argv[])
 {
     (void)argc; (void)argv;
-    if (XZCalibration_IsActive() != 0U) {
-        printf("[P3] EEPROM save: REJECTED (calibration active)\r\n");
+    if ((XZCalibration_IsActive() != 0U) ||
+        (XZVisionAlign_IsActive() != 0U)) {
+        printf("[P3] EEPROM save: REJECTED (XZ operation active)\r\n");
         return;
     }
     printf("[P3] EEPROM save: %s\r\n", XZCalibration_Save() ? "OK" : "FAILED");
@@ -1041,8 +1124,9 @@ static void cmd_p3_save(int argc, char *argv[])
 static void cmd_p3_load(int argc, char *argv[])
 {
     (void)argc; (void)argv;
-    if (XZCalibration_IsActive() != 0U) {
-        printf("[P3] EEPROM load: REJECTED (calibration active)\r\n");
+    if ((XZCalibration_IsActive() != 0U) ||
+        (XZVisionAlign_IsActive() != 0U)) {
+        printf("[P3] EEPROM load: REJECTED (XZ operation active)\r\n");
         return;
     }
     printf("[P3] EEPROM load: %s\r\n", XZCalibration_Load() ? "OK" : "FAILED");
@@ -1051,12 +1135,67 @@ static void cmd_p3_load(int argc, char *argv[])
 static void cmd_p3_reset(int argc, char *argv[])
 {
     (void)argc; (void)argv;
-    if (XZCalibration_IsActive() != 0U) {
-        printf("[P3] EEPROM reset: REJECTED (calibration active)\r\n");
+    if ((XZCalibration_IsActive() != 0U) ||
+        (XZVisionAlign_IsActive() != 0U)) {
+        printf("[P3] EEPROM reset: REJECTED (XZ operation active)\r\n");
         return;
     }
     printf("[P3] EEPROM reset: %s\r\n",
            XZCalibration_ResetStored() ? "OK" : "FAILED");
+}
+
+static void cmd_p4_start(int argc, char *argv[])
+{
+    XZVisionAlignStatus status;
+    (void)argc; (void)argv;
+    if (XZVisionAlign_Start(HAL_GetTick()) == 0U) {
+        XZVisionAlign_GetStatus(&status);
+        printf("[P4] start rejected: %s; require valid P3 calibration, "
+               "K230_2 command channel free, and X/Z referenced/IDLE\r\n",
+               XZVisionAlign_FaultString(status.fault));
+        return;
+    }
+    printf("[P4] K230_2 RED XZ alignment started: period=%lu ms\r\n",
+           (unsigned long)XZ_VISION_ALIGN_PERIOD_MS);
+}
+
+static void cmd_p4_status(int argc, char *argv[])
+{
+    XZVisionAlignStatus status;
+    (void)argc; (void)argv;
+    XZVisionAlign_GetStatus(&status);
+    printf("[P4] state=%s fault=%s seq=%u latest=(%d,%d) "
+           "decision_seq=%u decision=(%d,%d) error=(%ld,%ld) "
+           "raw=(%ld,%ld) scale=%u/1000 step=(%ld,%ld) "
+           "stable=%u corrections=%lu sample_age=%lu ms\r\n",
+           XZVisionAlign_StateString(status.state),
+           XZVisionAlign_FaultString(status.fault),
+           (unsigned int)status.last_sample_seq,
+           (int)status.pixel[0], (int)status.pixel[1],
+           (unsigned int)status.decision_sample_seq,
+           (int)status.decision_pixel[0],
+           (int)status.decision_pixel[1],
+           (long)status.error_pixel[0], (long)status.error_pixel[1],
+           (long)status.raw_pulses[0], (long)status.raw_pulses[1],
+           (unsigned int)status.vector_scale_permille,
+           (long)status.requested_pulses[0],
+           (long)status.requested_pulses[1],
+           (unsigned int)status.stable_samples,
+           (unsigned long)status.corrections,
+           (unsigned long)(HAL_GetTick() - status.last_sample_tick));
+    printf("[P4] pos=(%ld,%ld) target=(%ld,%ld) X=%s Z=%s\r\n",
+           (long)status.axis_position[0], (long)status.axis_position[1],
+           (long)status.attempted_target[0],
+           (long)status.attempted_target[1],
+           XY_ResultString(status.last_x_result),
+           ZAxis_ResultString(status.last_z_result));
+}
+
+static void cmd_p4_abort(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    MotionCoordinator_RequestAbort();
+    printf("[MOTION] P4 ABORT published\r\n");
 }
 
 static void cmd_z_move(int argc, char *argv[])
@@ -1066,8 +1205,10 @@ static void cmd_z_move(int argc, char *argv[])
                                       Z_AXIS_DEFAULT_SPEED_HZ;
     ZAxisControlResult result;
 
-    if (XZCalibration_ManualMotionAllowed() == 0U) {
-        printf("[Z] rejected: P3 XZ calibration owns motion\r\n");
+    if (shell_acquire_manual(0U) == 0U) return;
+    if ((XZCalibration_ManualMotionAllowed() == 0U) ||
+        (XZVisionAlign_IsActive() != 0U)) {
+        printf("[Z] rejected: automatic XZ operation owns motion\r\n");
         return;
     }
 
@@ -1093,8 +1234,10 @@ static void cmd_z_zero(int argc, char *argv[])
 {
     (void)argc;
     (void)argv;
-    if (XZCalibration_IsActive() != 0U) {
-        printf("[Z] rejected: P3 calibration active\r\n");
+    if (shell_acquire_manual(0U) == 0U) return;
+    if ((XZCalibration_IsActive() != 0U) ||
+        (XZVisionAlign_IsActive() != 0U)) {
+        printf("[Z] rejected: automatic XZ operation active\r\n");
         return;
     }
     printf("[Z] set current position as zero: %s\r\n",
@@ -1103,28 +1246,10 @@ static void cmd_z_zero(int argc, char *argv[])
 
 static void cmd_z_stop(int argc, char *argv[])
 {
-    ZAxisControlResult result;
     (void)argc;
     (void)argv;
-    if (XZCalibration_IsActive() != 0U) {
-        XZCalibration_Abort();
-        printf("[Z] stop requested; P3 aborted\r\n");
-        return;
-    }
-    result = ZAxisControl_Stop();
-    printf("[Z] stop: %s\r\n", ZAxis_ResultString(result));
-}
-
-static void cmd_z_clear(int argc, char *argv[])
-{
-    (void)argc;
-    (void)argv;
-    if (XZCalibration_IsActive() != 0U) {
-        printf("[Z] rejected: P3 calibration active\r\n");
-        return;
-    }
-    printf("[Z] clear fault: %s\r\n",
-           ZAxis_ResultString(ZAxisControl_ClearFault()));
+    MotionCoordinator_RequestAbort();
+    printf("[MOTION] unified X/Y/Z stop published\r\n");
 }
 
 static void cmd_z_status(int argc, char *argv[])
@@ -1142,6 +1267,13 @@ static void cmd_z_status(int argc, char *argv[])
            (long)control.position_pulses, (long)control.target_pulses,
            (long)Z_AXIS_SOFT_MIN_PULSES, (long)Z_AXIS_SOFT_MAX_PULSES,
            (unsigned long)Z_AXIS_DEFAULT_SPEED_HZ);
+    printf("[Z] recovery=automatic faults=%lu recovered=%lu "
+           "last=%s last_age=%lu ms\r\n",
+           (unsigned long)control.fault_count,
+           (unsigned long)control.auto_recovery_count,
+           ZAxis_FaultString(control.last_fault),
+           (unsigned long)((control.fault_count != 0U) ?
+                           (HAL_GetTick() - control.last_fault_tick) : 0U));
     printf("[Z] state=%s rx=%s response=0x%02X status=0x%02X speed=%lu "
            "steps=%lu age=%lu ms\r\n",
            ZAxisLink_StateString(status.state),
@@ -1161,11 +1293,72 @@ static void cmd_z_status(int argc, char *argv[])
            (unsigned long)status.timeouts);
 }
 
+static void cmd_motion_status(int argc, char *argv[])
+{
+    MotionCoordinatorStatus status;
+    (void)argc;
+    (void)argv;
+    MotionCoordinator_GetStatus(&status);
+    printf("[MOTION] owner=%s age=%lu ms required=0x%02X "
+           "latch=%s latch_age=%lu ms abort_pending=%u stop_pending=%u "
+           "gripper_frozen=%u manual_hold=%u\r\n",
+           MotionCoordinator_OwnerString(status.owner),
+           (unsigned long)(HAL_GetTick() - status.owner_since_tick),
+           (unsigned int)status.required_mask,
+           MotionCoordinator_LatchString(status.latch_reason),
+           (unsigned long)((status.latch_reason != MOTION_LATCH_NONE) ?
+               HAL_GetTick() - status.latch_tick : 0U),
+           (unsigned int)status.abort_pending,
+           (unsigned int)status.stop_pending,
+           (unsigned int)status.gripper_frozen,
+           (unsigned int)status.manual_hold);
+    printf("[MOTION] aborts=%lu axis_faults=%lu unified_stops=%lu\r\n",
+           (unsigned long)status.abort_count,
+           (unsigned long)status.axis_fault_count,
+           (unsigned long)status.stop_count);
+}
+
+static void cmd_abort(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+    MotionCoordinator_RequestAbort();
+    printf("[MOTION] ABORT published\r\n");
+}
+
+static void cmd_motion_resume(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+    printf("[MOTION] resume: %s\r\n",
+           MotionCoordinator_Resume(HAL_GetTick()) ? "OK" :
+           "REJECTED (stop active, axis fault, or axis moving)");
+}
+
+static void cmd_xyz_snapshot(int argc, char *argv[])
+{
+    MotionPositionSnapshot snapshot;
+    (void)argc;
+    (void)argv;
+    if (MotionCoordinator_CaptureSnapshot(&snapshot, 1U,
+                                          HAL_GetTick()) == 0U) {
+        printf("[MOTION] XYZ snapshot rejected: require valid, fault-free, "
+               "idle X/Y/Z coordinates\r\n");
+        return;
+    }
+    printf("[MOTION] XYZ snapshot=(%ld,%ld,%ld) tick=%lu\r\n",
+           (long)snapshot.x_pulses, (long)snapshot.y_pulses,
+           (long)snapshot.z_pulses,
+           (unsigned long)snapshot.capture_tick);
+}
+
 static void cmd_pos_rel(int argc, char *argv[])
 {
     (void)argc;
-    if (XZCalibration_IsActive() != 0U) {
-        printf("REL_MOVE rejected: P3 calibration active\r\n");
+    if (shell_acquire_manual(1U) == 0U) return;
+    if ((XZCalibration_IsActive() != 0U) ||
+        (XZVisionAlign_IsActive() != 0U)) {
+        printf("REL_MOVE rejected: automatic XZ operation active\r\n");
         return;
     }
     uint8_t  addr   = (uint8_t)atoi(argv[1]);
@@ -1182,8 +1375,10 @@ static void cmd_pos_rel(int argc, char *argv[])
 static void cmd_pos_abs(int argc, char *argv[])
 {
     (void)argc;
-    if (XZCalibration_IsActive() != 0U) {
-        printf("ABS_MOVE rejected: P3 calibration active\r\n");
+    if (shell_acquire_manual(1U) == 0U) return;
+    if ((XZCalibration_IsActive() != 0U) ||
+        (XZVisionAlign_IsActive() != 0U)) {
+        printf("ABS_MOVE rejected: automatic XZ operation active\r\n");
         return;
     }
     uint8_t  addr   = (uint8_t)atoi(argv[1]);
@@ -1200,8 +1395,10 @@ static void cmd_pos_abs(int argc, char *argv[])
 static void cmd_speed(int argc, char *argv[])
 {
     (void)argc;
-    if (XZCalibration_IsActive() != 0U) {
-        printf("SPEED rejected: P3 calibration active\r\n");
+    if (shell_acquire_manual(1U) == 0U) return;
+    if ((XZCalibration_IsActive() != 0U) ||
+        (XZVisionAlign_IsActive() != 0U)) {
+        printf("SPEED rejected: automatic XZ operation active\r\n");
         return;
     }
     uint8_t addr = (uint8_t)atoi(argv[1]);
@@ -1216,8 +1413,10 @@ static void cmd_speed(int argc, char *argv[])
 static void cmd_torque(int argc, char *argv[])
 {
     (void)argc;
-    if (XZCalibration_IsActive() != 0U) {
-        printf("TORQUE rejected: P3 calibration active\r\n");
+    if (shell_acquire_manual(1U) == 0U) return;
+    if ((XZCalibration_IsActive() != 0U) ||
+        (XZVisionAlign_IsActive() != 0U)) {
+        printf("TORQUE rejected: automatic XZ operation active\r\n");
         return;
     }
     uint8_t  addr = (uint8_t)atoi(argv[1]);
@@ -1230,21 +1429,19 @@ static void cmd_torque(int argc, char *argv[])
 
 static void cmd_stop(int argc, char *argv[])
 {
-    uint8_t addr = get_addr(argc, argv, 1);
-    if (XZCalibration_IsActive() != 0U) {
-        XZCalibration_Abort();
-        printf("STOP: P3 aborted; tracked axis stop requested\r\n");
-        return;
-    }
-    printf("STOP: addr=%d\r\n", addr);
-    smd_stop_now(addr);
+    (void)argc;
+    (void)argv;
+    MotionCoordinator_RequestAbort();
+    printf("[MOTION] unified X/Y/Z stop published\r\n");
 }
 
 static void cmd_enable(int argc, char *argv[])
 {
     (void)argc;
-    if (XZCalibration_IsActive() != 0U) {
-        printf("ENABLE rejected: P3 calibration active\r\n");
+    if (shell_acquire_manual(1U) == 0U) return;
+    if ((XZCalibration_IsActive() != 0U) ||
+        (XZVisionAlign_IsActive() != 0U)) {
+        printf("ENABLE rejected: automatic XZ operation active\r\n");
         return;
     }
     uint8_t addr = (uint8_t)atoi(argv[1]);
@@ -1257,8 +1454,10 @@ static void cmd_enable(int argc, char *argv[])
 static void cmd_zero(int argc, char *argv[])
 {
     uint8_t addr = get_addr(argc, argv, 1);
-    if (XZCalibration_IsActive() != 0U) {
-        printf("ANGLE_ZERO rejected: P3 calibration active\r\n");
+    if (shell_acquire_manual(1U) == 0U) return;
+    if ((XZCalibration_IsActive() != 0U) ||
+        (XZVisionAlign_IsActive() != 0U)) {
+        printf("ANGLE_ZERO rejected: automatic XZ operation active\r\n");
         return;
     }
     printf("ANGLE_ZERO: addr=%d\r\n", addr);
@@ -1268,8 +1467,8 @@ static void cmd_zero(int argc, char *argv[])
 static void cmd_clear(int argc, char *argv[])
 {
     uint8_t addr = get_addr(argc, argv, 1);
-    if (XZCalibration_IsActive() != 0U) {
-        printf("CLEAR_STATE rejected: P3 calibration active\r\n");
+    if (MotionCoordinator_GetOwner() != MOTION_OWNER_NONE) {
+        printf("CLEAR_STATE rejected: motion owner active\r\n");
         return;
     }
     printf("CLEAR_STATE: addr=%d\r\n", addr);
@@ -1323,6 +1522,11 @@ static void cmd_read_clog(int argc, char *argv[])
     uint8_t addr = get_addr(argc, argv, 1);
     smd_read_clog_flag(addr);
 }
+static void cmd_read_clog_cur(int argc, char *argv[])
+{
+    uint8_t addr = get_addr(argc, argv, 1);
+    smd_read_clog_cur(addr);
+}
 static void cmd_read_pos_err(int argc, char *argv[])
 {
     uint8_t addr = get_addr(argc, argv, 1);
@@ -1344,6 +1548,7 @@ static void cmd_read_sys(int argc, char *argv[])
 static void cmd_set_addr(int argc, char *argv[])
 {
     (void)argc;
+    if (shell_acquire_manual(1U) == 0U) return;
     uint8_t addr     = (uint8_t)atoi(argv[1]);
     uint8_t new_addr = (uint8_t)atoi(argv[2]);
     printf("SET_ADDR: %d -> %d\r\n", addr, new_addr);
@@ -1353,6 +1558,7 @@ static void cmd_set_addr(int argc, char *argv[])
 static void cmd_set_can_id(int argc, char *argv[])
 {
     (void)argc;
+    if (shell_acquire_manual(1U) == 0U) return;
     uint8_t  addr   = (uint8_t)atoi(argv[1]);
     uint32_t can_id = (uint32_t)strtoul(argv[2], NULL, 16);
     printf("SET_CAN_ID: addr=%d id=0x%08lX\r\n", addr, (unsigned long)can_id);
@@ -1362,6 +1568,7 @@ static void cmd_set_can_id(int argc, char *argv[])
 static void cmd_set_mode(int argc, char *argv[])
 {
     (void)argc;
+    if (shell_acquire_manual(1U) == 0U) return;
     uint8_t addr = (uint8_t)atoi(argv[1]);
     uint8_t mode = (uint8_t)atoi(argv[2]);
     printf("SET_MODE: addr=%d mode=%d\r\n", addr, mode);
@@ -1371,15 +1578,35 @@ static void cmd_set_mode(int argc, char *argv[])
 static void cmd_set_ma(int argc, char *argv[])
 {
     (void)argc;
+    if (shell_acquire_manual(1U) == 0U) return;
     uint8_t addr = (uint8_t)atoi(argv[1]);
     int16_t ma   = (int16_t)atoi(argv[2]);
     printf("SET_MA: addr=%d current=%d mA\r\n", addr, ma);
     smd_set_ma(addr, ma);
 }
 
+static void cmd_set_clog_cur(int argc, char *argv[])
+{
+    unsigned long ma;
+    uint8_t addr = (uint8_t)strtoul(argv[1], NULL, 0);
+    (void)argc;
+    if (shell_acquire_manual(1U) == 0U) return;
+    ma = strtoul(argv[2], NULL, 0);
+    if ((addr == SMD_BROADCAST_ADDR) || (ma == 0U) ||
+        (ma > SMD_CLOG_CURRENT_MAX_MA)) {
+        printf("Usage: set_clog_cur <addr=1..255> <ma=1..%u>\r\n",
+               (unsigned int)SMD_CLOG_CURRENT_MAX_MA);
+        return;
+    }
+    printf("SET_CLOG_CUR: addr=%u current=%lu mA (temporary)\r\n",
+           (unsigned int)addr, ma);
+    smd_set_clog_cur(addr, (uint16_t)ma);
+}
+
 static void cmd_param_save(int argc, char *argv[])
 {
     uint8_t addr = get_addr(argc, argv, 1);
+    if (shell_acquire_manual(1U) == 0U) return;
     printf("PARAM_SAVE: addr=%d\r\n", addr);
     smd_param_save(addr);
 }
@@ -1389,6 +1616,7 @@ static void cmd_param_save(int argc, char *argv[])
 static void cmd_restart(int argc, char *argv[])
 {
     uint8_t addr = get_addr(argc, argv, 1);
+    if (shell_acquire_manual(1U) == 0U) return;
     printf("RESTART: addr=%d\r\n", addr);
     smd_restart(addr);
 }
@@ -1396,6 +1624,7 @@ static void cmd_restart(int argc, char *argv[])
 static void cmd_cal(int argc, char *argv[])
 {
     uint8_t addr = get_addr(argc, argv, 1);
+    if (shell_acquire_manual(1U) == 0U) return;
     printf("CAL_ENCODER: addr=%d\r\n", addr);
     smd_cal_encoder(addr);
 }
@@ -1403,6 +1632,7 @@ static void cmd_cal(int argc, char *argv[])
 static void cmd_factory(int argc, char *argv[])
 {
     uint8_t addr = get_addr(argc, argv, 1);
+    if (shell_acquire_manual(1U) == 0U) return;
     printf("FACTORY_RESET: addr=%d\r\n", addr);
     smd_reset_factory(addr);
 }
@@ -1443,5 +1673,13 @@ void Shell_Poll(void)
 
         /* Parse and execute */
         parse_and_execute(line);
+    }
+}
+
+void Shell_PollEmergency(void)
+{
+    if (CLI_TakeAbortLine() != 0U) {
+        MotionCoordinator_RequestAbort();
+        printf("> abort\r\n[MOTION] ABORT published (lock-free)\r\n");
     }
 }

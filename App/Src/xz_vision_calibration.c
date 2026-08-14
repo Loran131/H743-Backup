@@ -3,8 +3,11 @@
 #include "c552.h"
 #include "eeprom.h"
 #include "main.h"
+#include "motion_coordinator.h"
 #include "xy_motor.h"
+#include "xy_vision_align.h"
 #include "z_axis.h"
+#include "xz_vision_align.h"
 #include <stddef.h>
 #include <string.h>
 
@@ -14,7 +17,7 @@
 #define XZ_CAL_SAMPLE_TIMEOUT_MS   5000U
 #define XZ_CAL_MODE_TIMEOUT_MS     1000U
 #define XZ_CAL_X_SPEED_RPM         300U
-#define XZ_CAL_Z_SPEED_HZ          90000U
+#define XZ_CAL_Z_SPEED_HZ          10000U
 #define XZ_CAL_ACCELERATION        200U
 #define XZ_CAL_EEPROM_ADDRESS      64U
 #define XZ_CAL_STORAGE_MAGIC       0x335A5843UL
@@ -300,8 +303,12 @@ uint8_t XZCalibration_Start(int32_t x_step, int32_t z_step, uint32_t now)
     VisionCalibrationStorageState storage_state = g_cal.storage_state;
     uint32_t generation = g_cal.storage_generation;
     C552_RequestResult request;
+    if (MotionCoordinator_Acquire(MOTION_OWNER_P3_CALIBRATION,
+                                  C552_DEVICE_K230_2, now) == 0U) return 0U;
     if ((state_active(g_cal.state) != 0U) ||
+        (XZVisionAlign_IsActive() != 0U) ||
         (VisionCalibration_IsActive() != 0U) ||
+        (XY_VisionAlign_IsActive() != 0U) ||
         (x_step <= 0) || (z_step <= 0) ||
         (get_positions(NULL, NULL, &x, &z) == 0U) ||
         (x.state != XY_STATE_IDLE) || (x.position_valid == 0U) ||
@@ -309,9 +316,10 @@ uint8_t XZCalibration_Start(int32_t x_step, int32_t z_step, uint32_t now)
         ((int64_t)x.position_pulses - x_step < x_cfg->soft_min_pulses) ||
         ((int64_t)x.position_pulses + x_step > x_cfg->soft_max_pulses) ||
         ((int64_t)z.position_pulses - z_step < Z_AXIS_SOFT_MIN_PULSES) ||
-        ((int64_t)z.position_pulses + z_step > Z_AXIS_SOFT_MAX_PULSES)) return 0U;
+        ((int64_t)z.position_pulses + z_step > Z_AXIS_SOFT_MAX_PULSES))
+        goto reject;
     request = C552_SetK230Mode(C552_ID_K230_2, C552_K230_MODE_RED_BLOCK, now);
-    if (request != C552_REQUEST_OK) return 0U;
+    if (request != C552_REQUEST_OK) goto reject;
     memset(&g_cal, 0, sizeof(g_cal));
     memset(&g_base, 0, sizeof(g_base));
     memset(&g_x_pos, 0, sizeof(g_x_pos));
@@ -327,11 +335,23 @@ uint8_t XZCalibration_Start(int32_t x_step, int32_t z_step, uint32_t now)
     set_state(XZ_CAL_WAIT_RED_MODE, now);
     g_deadline = now + XZ_CAL_MODE_TIMEOUT_MS;
     return 1U;
+
+reject:
+    MotionCoordinator_Release(MOTION_OWNER_P3_CALIBRATION, now);
+    return 0U;
 }
 
 uint8_t XZCalibration_CaptureReference(uint32_t now)
 {
     if (g_cal.state != XZ_CAL_MANUAL_ALIGN) return 0U;
+    if (MotionCoordinator_GetOwner() == MOTION_OWNER_MANUAL) {
+        MotionCoordinatorStatus motion;
+        MotionCoordinator_GetStatus(&motion);
+        if (motion.manual_hold != 0U) return 0U;
+        MotionCoordinator_Release(MOTION_OWNER_MANUAL, now);
+    }
+    if (MotionCoordinator_Acquire(MOTION_OWNER_P3_CALIBRATION,
+                                  C552_DEVICE_K230_2, now) == 0U) return 0U;
     set_state(XZ_CAL_WAIT_REFERENCE_IDLE, now);
     return 1U;
 }
@@ -430,7 +450,10 @@ void XZCalibration_Poll(uint32_t now)
         poll_move(1U, g_cal.base_pulses[1], XZ_CAL_FIT, 0U, now); break;
     case XZ_CAL_FIT:
         if (fit_matrix() == 0U) set_fault(XZ_CAL_FAULT_SINGULAR_MATRIX, now);
-        else set_state(XZ_CAL_MANUAL_ALIGN, now);
+        else {
+            set_state(XZ_CAL_MANUAL_ALIGN, now);
+            MotionCoordinator_Release(MOTION_OWNER_P3_CALIBRATION, now);
+        }
         break;
     case XZ_CAL_WAIT_REFERENCE_IDLE:
         if (axes_idle()) begin_sampling(XZ_CAL_CAPTURE_REFERENCE, now);

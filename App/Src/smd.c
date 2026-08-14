@@ -342,7 +342,7 @@ void smd_set_clog_pro(uint8_t addr, uint8_t enable)
     smd_send_cmd(addr, FCT_SET_CLOG_PRO, &enable, 1);
 }
 
-void smd_set_clog_cur(uint8_t addr, int16_t ma)
+void smd_set_clog_cur(uint8_t addr, uint16_t ma)
 {
     uint8_t data[2];
     data[0] = (ma >> 8) & 0xFF;
@@ -704,6 +704,14 @@ void smd_process_response(const uint8_t *buf, uint16_t len)
     case FCT_READ_CLOG_FLAG:
         if (data_len >= 1)
             printf("  Stalled=%s\r\n", pdata[0] ? "YES" : "No");
+        break;
+
+    case FCT_READ_CLOG_CUR:
+        if (data_len >= 2)
+        {
+            uint16_t ma = (uint16_t)(((uint16_t)pdata[0] << 8) | pdata[1]);
+            printf("  StallCurrent=%u mA\r\n", (unsigned int)ma);
+        }
         break;
 
     case FCT_READ_PHASE_MA:

@@ -2,6 +2,10 @@
 #include "c552.h"
 #include "eeprom.h"
 #include "motion_interfaces.h"
+#include "motion_coordinator.h"
+#include "xz_vision_align.h"
+#include "xz_vision_calibration.h"
+#include "xy_vision_align.h"
 #include <stddef.h>
 #include <string.h>
 
@@ -564,20 +568,27 @@ uint8_t VisionCalibration_Start(uint8_t k230_id, int32_t x_step_pulses,
     int64_t y_base;
     VisionCalibrationStorageState storage_state;
     uint32_t storage_generation;
+    uint8_t required_mask = (k230_id == VISION_CAL_K230_1_ID) ?
+                            C552_DEVICE_K230_1 : C552_DEVICE_K230_2;
 
-    if (vision_state_active(g_cal.state) != 0U) return 0U;
+    if (MotionCoordinator_Acquire(MOTION_OWNER_P2_CALIBRATION,
+                                  required_mask, now) == 0U) return 0U;
+    if ((vision_state_active(g_cal.state) != 0U) ||
+        (XZCalibration_IsActive() != 0U) ||
+        (XY_VisionAlign_IsActive() != 0U) ||
+        (XZVisionAlign_IsActive() != 0U)) goto reject;
     if (((k230_id != VISION_CAL_K230_1_ID) &&
          (k230_id != VISION_CAL_K230_2_ID)) ||
-        (x_step_pulses <= 0) || (y_step_pulses <= 0)) return 0U;
+        (x_step_pulses <= 0) || (y_step_pulses <= 0)) goto reject;
     if ((vision_get_axes(&x_status, &y_status) == 0U) ||
         (x_status.state != XY_STATE_IDLE) ||
         (y_status.state != XY_STATE_IDLE) ||
         (x_status.position_valid == 0U) ||
-        (y_status.position_valid == 0U)) return 0U;
+        (y_status.position_valid == 0U)) goto reject;
     x_base = (int64_t)x_cfg->soft_min_pulses + (2LL * x_step_pulses);
     y_base = (int64_t)y_cfg->soft_min_pulses + (2LL * y_step_pulses);
     if (((x_base + x_step_pulses) > x_cfg->soft_max_pulses) ||
-        ((y_base + y_step_pulses) > y_cfg->soft_max_pulses)) return 0U;
+        ((y_base + y_step_pulses) > y_cfg->soft_max_pulses)) goto reject;
 
     storage_state = g_cal.storage_state;
     storage_generation = g_cal.storage_generation;
@@ -600,11 +611,24 @@ uint8_t VisionCalibration_Start(uint8_t k230_id, int32_t x_step_pulses,
     vision_reset_collector();
     vision_set_state(VISION_CAL_MOVE_BASE_X, now);
     return 1U;
+
+reject:
+    MotionCoordinator_Release(MOTION_OWNER_P2_CALIBRATION, now);
+    return 0U;
 }
 
 uint8_t VisionCalibration_CaptureReference(uint32_t now)
 {
     if (g_cal.state != VISION_CAL_MANUAL_ALIGN) return 0U;
+    if (MotionCoordinator_GetOwner() == MOTION_OWNER_MANUAL) {
+        MotionCoordinatorStatus motion;
+        MotionCoordinator_GetStatus(&motion);
+        if (motion.manual_hold != 0U) return 0U;
+        MotionCoordinator_Release(MOTION_OWNER_MANUAL, now);
+    }
+    if (MotionCoordinator_Acquire(MOTION_OWNER_P2_CALIBRATION,
+            (g_cal.k230_id == VISION_CAL_K230_2_ID) ?
+                C552_DEVICE_K230_2 : C552_DEVICE_K230_1, now) == 0U) return 0U;
     vision_set_state(VISION_CAL_WAIT_REFERENCE_IDLE, now);
     return 1U;
 }
@@ -614,7 +638,7 @@ void VisionCalibration_Abort(void)
     if (vision_state_active(g_cal.state) == 0U) return;
     if ((g_cal.state != VISION_CAL_MANUAL_ALIGN) &&
         (g_cal.state != VISION_CAL_CAPTURE_REFERENCE)) {
-        xy_stop_all();
+        (void)xy_stop_all();
     }
     g_cal.fault = VISION_CAL_FAULT_NONE;
     g_cal.result.valid = 0U;
@@ -705,6 +729,7 @@ void VisionCalibration_Poll(uint32_t now)
             vision_set_fault(VISION_CAL_FAULT_SINGULAR_MATRIX, now);
         } else {
             vision_set_state(VISION_CAL_MANUAL_ALIGN, now);
+            MotionCoordinator_Release(MOTION_OWNER_P2_CALIBRATION, now);
         }
         break;
     case VISION_CAL_WAIT_REFERENCE_IDLE:

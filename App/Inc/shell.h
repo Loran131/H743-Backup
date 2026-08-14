@@ -18,6 +18,7 @@ extern "C" {
 
 /* Exported functions --------------------------------------------------------*/
 void Shell_Init(void);
+void Shell_PollEmergency(void); /* Parse lock-free ABORT publication only. */
 void Shell_Poll(void);   /* Call in main loop */
 
 #ifdef __cplusplus

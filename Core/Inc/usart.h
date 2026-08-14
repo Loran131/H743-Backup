@@ -56,6 +56,7 @@ void MX_UART4_Init(void);
 
 void CLI_StartRx(void);
 char *CLI_GetLine(void);
+uint8_t CLI_TakeAbortLine(void);
 HAL_StatusTypeDef USART3_StartRx(void);
 void USART3_RxPoll(void);
 HAL_StatusTypeDef USART3_TransmitAsync(const uint8_t *data, uint16_t length);

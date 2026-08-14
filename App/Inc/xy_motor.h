@@ -60,6 +60,7 @@ typedef enum {
     XY_COMPLETION_NONE = 0,
     XY_COMPLETION_ARRIVED,
     XY_COMPLETION_STATIC,
+    XY_COMPLETION_TOLERANCE,
     XY_COMPLETION_STOP_ACK,
     XY_COMPLETION_ZERO_ACK,
     XY_COMPLETION_HOME
@@ -112,6 +113,7 @@ typedef struct {
     uint32_t last_static_reply_tick;
     uint32_t arrived_release_count;
     uint32_t static_release_count;
+    uint32_t tolerance_release_count;
     XY_CompletionSource completion_source;
 } XY_AxisStatus;
 
@@ -122,6 +124,12 @@ typedef struct {
     uint32_t finish_tick;
 } XY_StartupStatus;
 
+typedef struct {
+    uint32_t fault_broadcast_count;
+    uint32_t stop_api_count;
+    uint32_t stop_all_count;
+} XY_StopDiagnostics;
+
 void XY_Motor_Init(uint32_t now);
 void XY_Motor_Poll(uint32_t now);
 
@@ -131,7 +139,7 @@ XY_Result XY_MoveAbsolute(XY_Axis axis, int32_t target_pulses,
                           uint16_t speed_rpm, uint8_t acceleration);
 
 void XY_Stop(XY_Axis axis);
-void xy_stop_all(void);
+uint8_t xy_stop_all(void);
 
 /* Homing is also used once by the reply-gated startup sequence. Fault recovery
  * never starts homing automatically. SetCurrentPositionAsZero is manual-only. */
@@ -146,6 +154,7 @@ const XY_AxisConfig *XY_GetConfig(XY_Axis axis);
 uint8_t XY_GetStatus(XY_Axis axis, XY_AxisStatus *status);
 uint8_t XY_AllIdle(void);
 void XY_GetStartupStatus(XY_StartupStatus *status);
+void XY_GetStopDiagnostics(XY_StopDiagnostics *diagnostics);
 const char *XY_ResultString(XY_Result result);
 const char *XY_StateString(XY_State state);
 const char *XY_FaultString(XY_Fault fault);

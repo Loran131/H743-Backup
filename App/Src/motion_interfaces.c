@@ -1,4 +1,5 @@
 #include "motion_interfaces.h"
+#include "motion_coordinator.h"
 #include "c552.h"
 #include "main.h"
 #include "z_axis_link.h"
@@ -71,6 +72,9 @@ MotionAuxResult Gripper_SetPosition(GripperPosition position)
     C552_RequestResult result;
     if ((position != GRIPPER_OPEN) && (position != GRIPPER_CLOSED)) {
         return MOTION_AUX_INVALID_ARGUMENT;
+    }
+    if (MotionCoordinator_IsGripperFrozen() != 0U) {
+        return MOTION_AUX_NOT_AVAILABLE;
     }
     result = C552_SetGripper(C552_GRIPPER_BOTH,
                              (position == GRIPPER_OPEN) ?

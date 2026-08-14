@@ -32,6 +32,7 @@
 #include "fdcan.h"
 #include "iwdg.h"
 #include "led.h"
+#include "motion_coordinator.h"
 #include "shell.h"
 #include "smd.h"
 #include "usart.h"
@@ -41,6 +42,7 @@
 #include "z_axis_link.h"
 #include "z_axis.h"
 #include "xz_vision_calibration.h"
+#include "xz_vision_align.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
@@ -188,6 +190,8 @@ void MX_FREERTOS_Init(void) {
   XZCalibration_Init(HAL_GetTick());
   VisionCalibration_Init(HAL_GetTick());
   XY_VisionAlign_Init(HAL_GetTick());
+  XZVisionAlign_Init(HAL_GetTick());
+  MotionCoordinator_Init(HAL_GetTick());
 
   /* USER CODE END Init */
 
@@ -299,6 +303,8 @@ static void StartLegacyIoTask(void *argument)
     C552_Poll(HAL_GetTick());
     UART4_RxPoll();
     ZAxisLink_Poll(HAL_GetTick());
+    Shell_PollEmergency();
+    MotionCoordinator_PollEmergency(HAL_GetTick());
 
     if (osMutexAcquire(canAccessMutexHandle, 0U) == osOK)
     {
@@ -321,8 +327,10 @@ static void StartLegacyIoTask(void *argument)
         smd_process_response(response, response_length);
       }
       XY_Motor_Poll(HAL_GetTick());
+      MotionCoordinator_Poll(HAL_GetTick());
       VisionCalibration_Poll(HAL_GetTick());
       XY_VisionAlign_Poll(HAL_GetTick());
+      XZVisionAlign_Poll(HAL_GetTick());
       (void)osMutexRelease(canAccessMutexHandle);
     }
     CriticalTaskBeat(HEALTH_LEGACY_IO_TASK);
@@ -336,7 +344,8 @@ static void StartShellTask(void *argument)
   Shell_Init();
   for (;;)
   {
-    if (osMutexAcquire(canAccessMutexHandle, osWaitForever) == osOK)
+    Shell_PollEmergency();
+    if (osMutexAcquire(canAccessMutexHandle, 0U) == osOK)
     {
       Shell_Poll();
       (void)osMutexRelease(canAccessMutexHandle);

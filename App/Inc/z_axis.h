@@ -53,6 +53,10 @@ typedef struct {
     uint32_t command_tick;
     uint32_t completion_tick;
     uint32_t completed_moves;
+    ZAxisControlFault last_fault;
+    uint32_t last_fault_tick;
+    uint32_t fault_count;
+    uint32_t auto_recovery_count;
 } ZAxisControlStatus;
 
 void ZAxis_Init(uint32_t now);

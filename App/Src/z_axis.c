@@ -12,10 +12,16 @@ static uint32_t g_last_uart_errors;
 static uint32_t g_last_timeouts;
 static uint8_t g_track_active_move;
 
-static void z_invalidate(ZAxisControlFault fault)
+static void z_invalidate(ZAxisControlFault fault, uint32_t now)
 {
-    g_z.position_valid = 0U;
+    if (g_z.state == Z_STATE_FAULT) return;
+    if (fault == Z_FAULT_POSITION_UNCERTAIN) {
+        g_z.position_valid = 0U;
+    }
     g_z.fault = fault;
+    g_z.last_fault = fault;
+    g_z.last_fault_tick = now;
+    ++g_z.fault_count;
     g_z.state = Z_STATE_FAULT;
 }
 
@@ -55,14 +61,14 @@ void ZAxis_Poll(uint32_t now)
                             Z_STATE_STOPPING : Z_STATE_UNREFERENCED;
                 g_z.fault = Z_FAULT_NONE;
             } else {
-                z_invalidate(Z_FAULT_CONTROLLER_REJECTED);
+                z_invalidate(Z_FAULT_CONTROLLER_REJECTED, now);
             }
         } else {
             position = (int64_t)g_z.position_pulses +
                        link.motion_result_signed_steps;
             if ((position < Z_AXIS_SOFT_MIN_PULSES) ||
                 (position > Z_AXIS_SOFT_MAX_PULSES)) {
-                z_invalidate(Z_FAULT_POSITION_UNCERTAIN);
+                z_invalidate(Z_FAULT_POSITION_UNCERTAIN, now);
             } else {
                 g_z.position_pulses = (int32_t)position;
                 ++g_z.completed_moves;
@@ -74,7 +80,7 @@ void ZAxis_Poll(uint32_t now)
                                 Z_STATE_STOPPING : Z_STATE_IDLE;
                     g_z.fault = Z_FAULT_NONE;
                 } else {
-                    z_invalidate(Z_FAULT_CONTROLLER_REJECTED);
+                    z_invalidate(Z_FAULT_CONTROLLER_REJECTED, now);
                 }
             }
         }
@@ -83,15 +89,28 @@ void ZAxis_Poll(uint32_t now)
 
     if (link.uart_errors != g_last_uart_errors) {
         g_last_uart_errors = link.uart_errors;
-        z_invalidate(Z_FAULT_LINK);
+        z_invalidate(Z_FAULT_LINK, now);
     }
     if (link.timeouts != g_last_timeouts) {
         g_last_timeouts = link.timeouts;
-        z_invalidate(Z_FAULT_TIMEOUT);
+        z_invalidate(Z_FAULT_TIMEOUT, now);
     }
     if ((link.state == Z_AXIS_STATE_FAULT) &&
         (g_z.state != Z_STATE_FAULT)) {
-        z_invalidate(Z_FAULT_CONTROLLER_REJECTED);
+        z_invalidate(Z_FAULT_CONTROLLER_REJECTED, now);
+    }
+
+    if ((g_z.state == Z_STATE_FAULT) && (link.rx_ready != 0U)) {
+        ZAxisLink_ClearFault();
+        ZAxisLink_GetStatus(&link);
+        if (link.state != Z_AXIS_STATE_FAULT) {
+            g_z.fault = Z_FAULT_NONE;
+            g_z.target_pulses = g_z.position_pulses;
+            g_z.state = g_z.position_valid ? Z_STATE_IDLE :
+                                               Z_STATE_UNREFERENCED;
+            g_track_active_move = 0U;
+            ++g_z.auto_recovery_count;
+        }
     }
 
     if (g_z.state == Z_STATE_STARTING) {
@@ -189,13 +208,15 @@ ZAxisControlResult ZAxisControl_SetZero(void)
 ZAxisControlResult ZAxisControl_ClearFault(void)
 {
     ZAxisStatus link;
-    if (g_z.state != Z_STATE_FAULT) return Z_RESULT_OK;
     ZAxisLink_GetStatus(&link);
+    if ((g_z.state != Z_STATE_FAULT) &&
+        (link.state != Z_AXIS_STATE_FAULT)) return Z_RESULT_OK;
     if (link.rx_ready == 0U) return Z_RESULT_LINK_ERROR;
     ZAxisLink_ClearFault();
     g_z.fault = Z_FAULT_NONE;
-    g_z.position_valid = 0U;
-    g_z.state = Z_STATE_UNREFERENCED;
+    g_z.target_pulses = g_z.position_pulses;
+    g_z.state = g_z.position_valid ? Z_STATE_IDLE : Z_STATE_UNREFERENCED;
+    g_track_active_move = 0U;
     return Z_RESULT_OK;
 }
 

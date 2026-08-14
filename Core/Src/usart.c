@@ -683,4 +683,39 @@ char *CLI_GetLine(void)
   return (char *)g_cli_line_buf;
 }
 
+uint8_t CLI_TakeAbortLine(void)
+{
+  uint16_t length;
+  uint16_t begin = 0U;
+  uint16_t end;
+  uint32_t primask;
+  uint8_t is_abort = 0U;
+  if ((g_cli_rx_state & 0x8000U) == 0U) return 0U;
+
+  primask = __get_PRIMASK();
+  __disable_irq();
+  length = (uint16_t)(g_cli_rx_state & 0x3FFFU);
+  end = length;
+  while ((begin < end) && ((g_cli_rx_buf[begin] == ' ') ||
+         (g_cli_rx_buf[begin] == '\t'))) ++begin;
+  while ((end > begin) && ((g_cli_rx_buf[end - 1U] == ' ') ||
+         (g_cli_rx_buf[end - 1U] == '\t'))) --end;
+  if ((end - begin) == 5U) {
+    static const char abort_word[] = "abort";
+    uint16_t index;
+    is_abort = 1U;
+    for (index = 0U; index < 5U; ++index) {
+      uint8_t ch = g_cli_rx_buf[begin + index];
+      if ((ch >= 'A') && (ch <= 'Z')) ch = (uint8_t)(ch + ('a' - 'A'));
+      if (ch != (uint8_t)abort_word[index]) {
+        is_abort = 0U;
+        break;
+      }
+    }
+  }
+  if (is_abort != 0U) g_cli_rx_state = 0U;
+  if (primask == 0U) __enable_irq();
+  return is_abort;
+}
+
 /* USER CODE END 1 */

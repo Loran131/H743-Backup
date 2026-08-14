@@ -1,7 +1,10 @@
 #include "xy_vision_align.h"
 #include "c552.h"
 #include "motion_interfaces.h"
+#include "motion_coordinator.h"
 #include "xy_motor.h"
+#include "xz_vision_align.h"
+#include "xz_vision_calibration.h"
 #include <limits.h>
 #include <stddef.h>
 #include <string.h>
@@ -130,18 +133,26 @@ void XY_VisionAlign_Init(uint32_t now)
 
 uint8_t XY_VisionAlign_Start(uint32_t now)
 {
+    uint8_t required_mask =
+        (g_xy_vision_calibration.k230_id == C552_ID_K230_2) ?
+        C552_DEVICE_K230_2 : C552_DEVICE_K230_1;
+    if (MotionCoordinator_Acquire(MOTION_OWNER_XY_ALIGN,
+                                  required_mask, now) == 0U) return 0U;
     if ((g_align.state == XY_VISION_ALIGN_WAIT_SAMPLE) ||
         (g_align.state == XY_VISION_ALIGN_MOVE_X) ||
-        (g_align.state == XY_VISION_ALIGN_MOVE_Y)) return 0U;
+        (g_align.state == XY_VISION_ALIGN_MOVE_Y)) goto reject;
+    if ((VisionCalibration_IsActive() != 0U) ||
+        (XZCalibration_IsActive() != 0U) ||
+        (XZVisionAlign_IsActive() != 0U)) goto reject;
     if (g_xy_vision_calibration.calibrated == 0U) {
         g_align.fault = XY_VISION_ALIGN_FAULT_NOT_CALIBRATED;
         g_align.state = XY_VISION_ALIGN_FAULT;
-        return 0U;
+        goto reject;
     }
     if (align_axes_ready() == 0U) {
         g_align.fault = XY_VISION_ALIGN_FAULT_AXIS_NOT_READY;
         g_align.state = XY_VISION_ALIGN_FAULT;
-        return 0U;
+        goto reject;
     }
 
     memset(&g_align, 0, sizeof(g_align));
@@ -153,6 +164,10 @@ uint8_t XY_VisionAlign_Start(uint32_t now)
     g_next_decision_tick = now;
     g_last_decision_seq = 0U;
     return 1U;
+
+reject:
+    MotionCoordinator_Release(MOTION_OWNER_XY_ALIGN, now);
+    return 0U;
 }
 
 void XY_VisionAlign_Abort(void)

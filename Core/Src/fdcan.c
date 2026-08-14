@@ -58,9 +58,6 @@ static void can_request_recovery(uint32_t reason)
     g_can_recovery_requested = 1U;
 }
 
-/* TX header (reused for all sends) */
-static FDCAN_TxHeaderTypeDef g_tx_header;
-
 static uint8_t can_read_fifo0_message(FDCAN_HandleTypeDef *hfdcan)
 {
     FDCAN_RxHeaderTypeDef rx_header;
@@ -309,6 +306,7 @@ void can_set_filter_mask(uint32_t ext_id, uint32_t mask)
  */
 uint8_t can_send_msg(uint32_t ext_id, const uint8_t *data, uint8_t len)
 {
+    FDCAN_TxHeaderTypeDef tx_header;
     if ((len > 8U) || g_can_recovery_requested || g_can_bus_off_active)
         return 1;
 
@@ -319,18 +317,18 @@ uint8_t can_send_msg(uint32_t ext_id, const uint8_t *data, uint8_t len)
     }
 
     /* Prepare TX header */
-    g_tx_header.Identifier = ext_id;
-    g_tx_header.IdType = FDCAN_EXTENDED_ID;
-    g_tx_header.TxFrameType = FDCAN_DATA_FRAME;
+    tx_header.Identifier = ext_id;
+    tx_header.IdType = FDCAN_EXTENDED_ID;
+    tx_header.TxFrameType = FDCAN_DATA_FRAME;
     /* This HAL expects the unshifted DLC value and shifts it when writing RAM. */
-    g_tx_header.DataLength = len;
-    g_tx_header.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
-    g_tx_header.BitRateSwitch = FDCAN_BRS_OFF;
-    g_tx_header.FDFormat = FDCAN_CLASSIC_CAN;
-    g_tx_header.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
-    g_tx_header.MessageMarker = 0;
+    tx_header.DataLength = len;
+    tx_header.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+    tx_header.BitRateSwitch = FDCAN_BRS_OFF;
+    tx_header.FDFormat = FDCAN_CLASSIC_CAN;
+    tx_header.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+    tx_header.MessageMarker = 0;
 
-    if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2, &g_tx_header,
+    if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2, &tx_header,
                                        (uint8_t *)data) != HAL_OK)
     {
         g_can_diagnostics.tx_enqueue_fail_count++;
@@ -367,6 +365,11 @@ uint8_t can_send_msg(uint32_t ext_id, const uint8_t *data, uint8_t len)
 uint8_t can_send_long_msg(uint32_t ext_id, const uint8_t *data, uint16_t len)
 {
     uint16_t offset = 0;
+    uint32_t primask = __get_PRIMASK();
+
+    /* Keep protocol fragments contiguous when an emergency stop preempts a
+     * normal task and also needs the shared CAN TX FIFO. */
+    __disable_irq();
 
     while (offset < len)
     {
@@ -374,12 +377,14 @@ uint8_t can_send_long_msg(uint32_t ext_id, const uint8_t *data, uint16_t len)
 
         if (can_send_msg(ext_id, &data[offset], chunk_len) != 0)
         {
+            if (primask == 0U) __enable_irq();
             return 1;
         }
 
         offset += chunk_len;
     }
 
+    if (primask == 0U) __enable_irq();
     return 0;
 }
 

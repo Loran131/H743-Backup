@@ -13,6 +13,8 @@
 #define XY_HOME_MAX_RETRIES         2U
 #define XY_HOME_ZERO_SETTLE_MS      300U
 #define XY_MOVE_STATIC_GUARD_MS     100U
+#define XY_X_SETTLE_TOLERANCE_PULSES 1024
+#define XY_X_SETTLE_POSITION_SAMPLES 3U
 
 typedef struct {
     XY_AxisStatus status;
@@ -27,6 +29,7 @@ typedef struct {
     int32_t zero_offset_pulses;
     uint32_t home_start_tick;
     uint32_t home_next_action_tick;
+    uint8_t settle_position_count;
 } XY_AxisRuntime;
 
 enum {
@@ -46,7 +49,7 @@ static XY_AxisConfig g_xy_config[XY_AXIS_COUNT] = {
     {
         .motor_address = XY_X_MOTOR_ADDRESS,
         .positive_direction = XY_POSITIVE_DIRECTION,
-        .acceleration = 200U,
+        .acceleration = 100U,
         .default_speed_rpm = 3000U,
         .max_speed_rpm = 3000U,
         .soft_min_pulses = 0,
@@ -69,7 +72,7 @@ static XY_AxisConfig g_xy_config[XY_AXIS_COUNT] = {
         .home_direction = XY_NEGATIVE_DIRECTION,
         /* Y mechanics require a deliberately low sensorless-homing speed. */
         .home_speed_rpm = 10U,
-        .home_current_ma = 500,
+        .home_current_ma = 400,
         .home_timeout_ms = 30000U
     }
 };
@@ -84,6 +87,7 @@ static uint8_t g_query_function;
 static XY_Axis g_query_axis;
 static uint8_t g_emergency_stop_pending;
 static uint32_t g_emergency_stop_tick;
+static XY_StopDiagnostics g_stop_diagnostics;
 
 static uint8_t xy_command_ack_pending(void);
 
@@ -122,6 +126,7 @@ static void xy_set_fault(XY_Axis axis, XY_Fault fault)
     runtime->waiting_stop_ack = 0U;
     runtime->waiting_home_ack = 0U;
     runtime->waiting_zero_ack = 0U;
+    runtime->settle_position_count = 0U;
     runtime->home_stage = XY_HOME_STAGE_IDLE;
     g_query_outstanding = 0U;
     g_emergency_stop_pending = 1U;
@@ -170,6 +175,7 @@ static uint8_t xy_response_callback(const SmdResponse *response)
                                 XY_STATE_IDLE : XY_STATE_UNREFERENCED;
         runtime->status.completion_tick = response->rx_tick;
         runtime->status.completion_source = XY_COMPLETION_STOP_ACK;
+        runtime->settle_position_count = 0U;
         return 1U;
 
     case FCT_ANGLE_ZERO:
@@ -203,8 +209,33 @@ static uint8_t xy_response_callback(const SmdResponse *response)
                 runtime->home_next_action_tick = response->rx_tick +
                                                  XY_BUS_GUARD_MS;
             } else if (runtime->status.position_valid != 0U) {
+                int64_t position_error;
                 runtime->status.position_pulses =
                     runtime->raw_position_pulses - runtime->zero_offset_pulses;
+                position_error = (int64_t)runtime->status.position_pulses -
+                                 runtime->status.target_pulses;
+                if ((axis == XY_AXIS_X) &&
+                    (runtime->status.state == XY_STATE_MOVING) &&
+                    (position_error >= -XY_X_SETTLE_TOLERANCE_PULSES) &&
+                    (position_error <= XY_X_SETTLE_TOLERANCE_PULSES)) {
+                    if (runtime->settle_position_count <
+                        XY_X_SETTLE_POSITION_SAMPLES) {
+                        ++runtime->settle_position_count;
+                    }
+                    if (runtime->settle_position_count >=
+                        XY_X_SETTLE_POSITION_SAMPLES) {
+                        runtime->status.target_pulses =
+                            runtime->status.position_pulses;
+                        runtime->status.state = XY_STATE_IDLE;
+                        runtime->status.completion_tick = response->rx_tick;
+                        runtime->status.completion_source =
+                            XY_COMPLETION_TOLERANCE;
+                        ++runtime->status.tolerance_release_count;
+                        runtime->settle_position_count = 0U;
+                    }
+                } else {
+                    runtime->settle_position_count = 0U;
+                }
             }
         }
         return 1U;
@@ -364,6 +395,7 @@ void XY_Motor_Init(uint32_t now)
     g_query_outstanding = 0U;
     g_query_axis = XY_AXIS_X;
     g_emergency_stop_pending = 0U;
+    memset(&g_stop_diagnostics, 0, sizeof(g_stop_diagnostics));
     g_emergency_stop_tick = now;
     memset(&g_xy_startup, 0, sizeof(g_xy_startup));
     g_xy_startup.state = XY_STARTUP_WAITING_REPLIES;
@@ -635,6 +667,7 @@ void XY_Motor_Poll(uint32_t now)
     if ((g_emergency_stop_pending != 0U) &&
         ((int32_t)(now - g_emergency_stop_tick) >= 0)) {
         (void)smd_send_cmd(SMD_BROADCAST_ADDR, FCT_STOP_NOW, NULL, 0U);
+        ++g_stop_diagnostics.fault_broadcast_count;
         g_emergency_stop_pending = 0U;
         return;
     }
@@ -711,6 +744,7 @@ XY_Result XY_MoveRelative(XY_Axis axis, int32_t delta_pulses,
     runtime->status.last_command_function = FCT_POS_REL_MODE;
     runtime->status.state = XY_STATE_STARTING;
     runtime->waiting_move_ack = 1U;
+    runtime->settle_position_count = 0U;
     return XY_RESULT_OK;
 }
 
@@ -741,15 +775,20 @@ void XY_Stop(XY_Axis axis)
     runtime->waiting_stop_ack = 1U;
     runtime->waiting_move_ack = 0U;
     runtime->waiting_home_ack = 0U;
+    runtime->settle_position_count = 0U;
+    ++g_stop_diagnostics.stop_api_count;
 }
 
-void xy_stop_all(void)
+uint8_t xy_stop_all(void)
 {
     uint32_t now = HAL_GetTick();
 
     /* One broadcast avoids simultaneous X/Y replies in the shared RX stream. */
     g_query_outstanding = 0U;
-    (void)smd_send_cmd(SMD_BROADCAST_ADDR, FCT_STOP_NOW, NULL, 0U);
+    if (smd_send_cmd(SMD_BROADCAST_ADDR, FCT_STOP_NOW, NULL, 0U) != 0U) {
+        return 0U;
+    }
+    ++g_stop_diagnostics.stop_all_count;
     for (uint8_t i = 0U; i < XY_AXIS_COUNT; ++i) {
         XY_AxisRuntime *runtime = &g_xy_runtime[i];
         runtime->status.command_tick = now;
@@ -760,7 +799,9 @@ void xy_stop_all(void)
         runtime->waiting_home_ack = 0U;
         runtime->waiting_zero_ack = 0U;
         runtime->home_stage = XY_HOME_STAGE_IDLE;
+        runtime->settle_position_count = 0U;
     }
+    return 1U;
 }
 
 XY_Result XY_HomeSensorless(XY_Axis axis)
@@ -878,6 +919,11 @@ void XY_GetStartupStatus(XY_StartupStatus *status)
     if (status != NULL) *status = g_xy_startup;
 }
 
+void XY_GetStopDiagnostics(XY_StopDiagnostics *diagnostics)
+{
+    if (diagnostics != NULL) *diagnostics = g_stop_diagnostics;
+}
+
 const char *XY_ResultString(XY_Result result)
 {
     static const char *const names[] = {
@@ -912,7 +958,8 @@ const char *XY_FaultString(XY_Fault fault)
 const char *XY_CompletionSourceString(XY_CompletionSource source)
 {
     static const char *const names[] = {
-        "NONE", "ARRIVED", "STATIC", "STOP_ACK", "ZERO_ACK", "HOME"
+        "NONE", "ARRIVED", "STATIC", "TOLERANCE", "STOP_ACK",
+        "ZERO_ACK", "HOME"
     };
     return ((uint32_t)source < (sizeof(names) / sizeof(names[0]))) ?
            names[source] : "UNKNOWN";

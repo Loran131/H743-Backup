@@ -28,6 +28,7 @@ extern "C" {
 /* Frame buffer size (max response frame length) -----------------------------*/
 #define SMD_FRAME_BUF_SIZE      256
 #define SMD_RX_BUF_SIZE         512
+#define SMD_CLOG_CURRENT_MAX_MA 3000U
 
 /* ======================== FUNCTION CODE ENUM ============================== */
 
@@ -211,7 +212,7 @@ void smd_set_speed_pid(uint8_t addr, uint32_t kp, uint32_t ki, uint32_t kd);
 void smd_set_pos_torque(uint8_t addr, int16_t torque_ma);
 void smd_set_ma(uint8_t addr, int16_t ma);
 void smd_set_clog_pro(uint8_t addr, uint8_t enable);
-void smd_set_clog_cur(uint8_t addr, int16_t ma);
+void smd_set_clog_cur(uint8_t addr, uint16_t ma);
 void smd_set_dir_level(uint8_t addr, uint8_t level);
 void smd_set_en_level(uint8_t addr, uint8_t level);
 void smd_set_cmd_echo(uint8_t addr, uint8_t echo);
