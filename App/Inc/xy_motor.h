@@ -138,14 +138,13 @@ XY_Result XY_MoveRelative(XY_Axis axis, int32_t delta_pulses,
 XY_Result XY_MoveAbsolute(XY_Axis axis, int32_t target_pulses,
                           uint16_t speed_rpm, uint8_t acceleration);
 
-void XY_Stop(XY_Axis axis);
+uint8_t XY_Stop(XY_Axis axis);
 uint8_t xy_stop_all(void);
 
 /* Homing is also used once by the reply-gated startup sequence. Fault recovery
  * never starts homing automatically. SetCurrentPositionAsZero is manual-only. */
 XY_Result XY_HomeSensorless(XY_Axis axis);
 XY_Result XY_SetCurrentPositionAsZero(XY_Axis axis);
-XY_Result XY_ClearFault(XY_Axis axis);
 
 XY_Result XY_SetSoftLimits(XY_Axis axis, int32_t min_pulses,
                            int32_t max_pulses);

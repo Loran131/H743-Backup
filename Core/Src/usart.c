@@ -33,12 +33,12 @@ static volatile uint8_t g_usart3_rx_restart_pending;
 static uint8_t g_usart3_rx_failure_recorded;
 static uint32_t g_usart3_rx_last_restart_tick;
 
-#define UART4_RX_DMA_SIZE 64U
-static uint8_t g_uart4_rx_dma[UART4_RX_DMA_SIZE]
+#define USART6_RX_DMA_SIZE 64U
+static uint8_t g_usart6_rx_dma[USART6_RX_DMA_SIZE]
     __attribute__((section(".dma_buffer"), aligned(32)));
-static volatile uint16_t g_uart4_rx_dma_position;
-static volatile uint8_t g_uart4_rx_restart_pending;
-static uint32_t g_uart4_rx_last_restart_tick;
+static volatile uint16_t g_usart6_rx_dma_position;
+static volatile uint8_t g_usart6_rx_restart_pending;
+static uint32_t g_usart6_rx_last_restart_tick;
 
 #define CLI_BUF_SIZE 256U
 static uint8_t g_cli_rx_buf[CLI_BUF_SIZE];
@@ -50,32 +50,32 @@ static uint8_t g_uart1_rx_byte;
 
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart3;
-UART_HandleTypeDef huart4;
+UART_HandleTypeDef huart6;
 DMA_HandleTypeDef hdma_usart3_rx;
-DMA_HandleTypeDef hdma_uart4_rx;
-DMA_HandleTypeDef hdma_uart4_tx;
+DMA_HandleTypeDef hdma_usart6_rx;
+DMA_HandleTypeDef hdma_usart6_tx;
 
-/* UART4 init function */
-void MX_UART4_Init(void)
+/* USART6 init function */
+void MX_USART6_UART_Init(void)
 {
-  huart4.Instance = UART4;
-  huart4.Init.BaudRate = 115200;
-  huart4.Init.WordLength = UART_WORDLENGTH_8B;
-  huart4.Init.StopBits = UART_STOPBITS_1;
-  huart4.Init.Parity = UART_PARITY_NONE;
-  huart4.Init.Mode = UART_MODE_TX_RX;
-  huart4.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart4.Init.OverSampling = UART_OVERSAMPLING_16;
-  huart4.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart4.Init.ClockPrescaler = UART_PRESCALER_DIV1;
-  huart4.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart4) != HAL_OK)
+  huart6.Instance = USART6;
+  huart6.Init.BaudRate = 9600;
+  huart6.Init.WordLength = UART_WORDLENGTH_8B;
+  huart6.Init.StopBits = UART_STOPBITS_1;
+  huart6.Init.Parity = UART_PARITY_NONE;
+  huart6.Init.Mode = UART_MODE_TX_RX;
+  huart6.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart6.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart6.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart6.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart6.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart6) != HAL_OK)
   {
     Error_Handler();
   }
-  if (HAL_UARTEx_SetTxFifoThreshold(&huart4, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK ||
-      HAL_UARTEx_SetRxFifoThreshold(&huart4, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK ||
-      HAL_UARTEx_DisableFifoMode(&huart4) != HAL_OK)
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart6, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK ||
+      HAL_UARTEx_SetRxFifoThreshold(&huart6, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK ||
+      HAL_UARTEx_DisableFifoMode(&huart6) != HAL_OK)
   {
     Error_Handler();
   }
@@ -175,63 +175,63 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
 
   GPIO_InitTypeDef GPIO_InitStruct = {0};
   RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
-  if(uartHandle->Instance==UART4)
+  if(uartHandle->Instance==USART6)
   {
-    PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_UART4;
-    PeriphClkInitStruct.Usart234578ClockSelection = RCC_USART234578CLKSOURCE_D2PCLK1;
+    PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_USART6;
+    PeriphClkInitStruct.Usart16ClockSelection = RCC_USART16CLKSOURCE_D2PCLK2;
     if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
     {
       Error_Handler();
     }
 
-    __HAL_RCC_UART4_CLK_ENABLE();
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-    GPIO_InitStruct.Pin = GPIO_PIN_11|GPIO_PIN_12;
+    __HAL_RCC_USART6_CLK_ENABLE();
+    __HAL_RCC_GPIOC_CLK_ENABLE();
+    GPIO_InitStruct.Pin = GPIO_PIN_6|GPIO_PIN_7;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    GPIO_InitStruct.Alternate = GPIO_AF6_UART4;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    GPIO_InitStruct.Alternate = GPIO_AF7_USART6;
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
     __HAL_RCC_DMA1_CLK_ENABLE();
-    hdma_uart4_rx.Instance = DMA1_Stream1;
-    hdma_uart4_rx.Init.Request = DMA_REQUEST_UART4_RX;
-    hdma_uart4_rx.Init.Direction = DMA_PERIPH_TO_MEMORY;
-    hdma_uart4_rx.Init.PeriphInc = DMA_PINC_DISABLE;
-    hdma_uart4_rx.Init.MemInc = DMA_MINC_ENABLE;
-    hdma_uart4_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
-    hdma_uart4_rx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
-    hdma_uart4_rx.Init.Mode = DMA_CIRCULAR;
-    hdma_uart4_rx.Init.Priority = DMA_PRIORITY_HIGH;
-    hdma_uart4_rx.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
-    if (HAL_DMA_Init(&hdma_uart4_rx) != HAL_OK)
+    hdma_usart6_rx.Instance = DMA1_Stream1;
+    hdma_usart6_rx.Init.Request = DMA_REQUEST_USART6_RX;
+    hdma_usart6_rx.Init.Direction = DMA_PERIPH_TO_MEMORY;
+    hdma_usart6_rx.Init.PeriphInc = DMA_PINC_DISABLE;
+    hdma_usart6_rx.Init.MemInc = DMA_MINC_ENABLE;
+    hdma_usart6_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+    hdma_usart6_rx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
+    hdma_usart6_rx.Init.Mode = DMA_CIRCULAR;
+    hdma_usart6_rx.Init.Priority = DMA_PRIORITY_HIGH;
+    hdma_usart6_rx.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
+    if (HAL_DMA_Init(&hdma_usart6_rx) != HAL_OK)
     {
       Error_Handler();
     }
-    __HAL_LINKDMA(uartHandle, hdmarx, hdma_uart4_rx);
+    __HAL_LINKDMA(uartHandle, hdmarx, hdma_usart6_rx);
 
-    hdma_uart4_tx.Instance = DMA1_Stream2;
-    hdma_uart4_tx.Init.Request = DMA_REQUEST_UART4_TX;
-    hdma_uart4_tx.Init.Direction = DMA_MEMORY_TO_PERIPH;
-    hdma_uart4_tx.Init.PeriphInc = DMA_PINC_DISABLE;
-    hdma_uart4_tx.Init.MemInc = DMA_MINC_ENABLE;
-    hdma_uart4_tx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
-    hdma_uart4_tx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
-    hdma_uart4_tx.Init.Mode = DMA_NORMAL;
-    hdma_uart4_tx.Init.Priority = DMA_PRIORITY_HIGH;
-    hdma_uart4_tx.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
-    if (HAL_DMA_Init(&hdma_uart4_tx) != HAL_OK)
+    hdma_usart6_tx.Instance = DMA1_Stream2;
+    hdma_usart6_tx.Init.Request = DMA_REQUEST_USART6_TX;
+    hdma_usart6_tx.Init.Direction = DMA_MEMORY_TO_PERIPH;
+    hdma_usart6_tx.Init.PeriphInc = DMA_PINC_DISABLE;
+    hdma_usart6_tx.Init.MemInc = DMA_MINC_ENABLE;
+    hdma_usart6_tx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+    hdma_usart6_tx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
+    hdma_usart6_tx.Init.Mode = DMA_NORMAL;
+    hdma_usart6_tx.Init.Priority = DMA_PRIORITY_HIGH;
+    hdma_usart6_tx.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
+    if (HAL_DMA_Init(&hdma_usart6_tx) != HAL_OK)
     {
       Error_Handler();
     }
-    __HAL_LINKDMA(uartHandle, hdmatx, hdma_uart4_tx);
+    __HAL_LINKDMA(uartHandle, hdmatx, hdma_usart6_tx);
 
     HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
     HAL_NVIC_SetPriority(DMA1_Stream2_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(DMA1_Stream2_IRQn);
-    HAL_NVIC_SetPriority(UART4_IRQn, 5, 0);
-    HAL_NVIC_EnableIRQ(UART4_IRQn);
+    HAL_NVIC_SetPriority(USART6_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(USART6_IRQn);
   }
   else if(uartHandle->Instance==USART1)
   {
@@ -327,15 +327,15 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
 void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
 {
 
-  if(uartHandle->Instance==UART4)
+  if(uartHandle->Instance==USART6)
   {
-    __HAL_RCC_UART4_CLK_DISABLE();
-    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_11|GPIO_PIN_12);
+    __HAL_RCC_USART6_CLK_DISABLE();
+    HAL_GPIO_DeInit(GPIOC, GPIO_PIN_6|GPIO_PIN_7);
     HAL_DMA_DeInit(uartHandle->hdmarx);
     HAL_DMA_DeInit(uartHandle->hdmatx);
     HAL_NVIC_DisableIRQ(DMA1_Stream1_IRQn);
     HAL_NVIC_DisableIRQ(DMA1_Stream2_IRQn);
-    HAL_NVIC_DisableIRQ(UART4_IRQn);
+    HAL_NVIC_DisableIRQ(USART6_IRQn);
   }
   else if(uartHandle->Instance==USART1)
   {
@@ -457,42 +457,42 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t size)
   {
     usart3_process_dma_position(size);
   }
-  else if (huart->Instance == UART4)
+  else if (huart->Instance == USART6)
   {
-    uint16_t previous = g_uart4_rx_dma_position;
+    uint16_t previous = g_usart6_rx_dma_position;
     uint32_t now = HAL_GetTick();
-    if (size > UART4_RX_DMA_SIZE)
+    if (size > USART6_RX_DMA_SIZE)
     {
       ZAxisLink_OnUartError(HAL_UART_ERROR_DMA, now);
       return;
     }
     if (size > previous)
     {
-      ZAxisLink_ProcessBytes(&g_uart4_rx_dma[previous],
+      ZAxisLink_ProcessBytes(&g_usart6_rx_dma[previous],
                              (uint16_t)(size - previous), now);
     }
     else if (size < previous)
     {
-      ZAxisLink_ProcessBytes(&g_uart4_rx_dma[previous],
-                             (uint16_t)(UART4_RX_DMA_SIZE - previous), now);
+      ZAxisLink_ProcessBytes(&g_usart6_rx_dma[previous],
+                             (uint16_t)(USART6_RX_DMA_SIZE - previous), now);
       if (size > 0U)
       {
-        ZAxisLink_ProcessBytes(g_uart4_rx_dma, size, now);
+        ZAxisLink_ProcessBytes(g_usart6_rx_dma, size, now);
       }
     }
-    g_uart4_rx_dma_position =
-        (size == UART4_RX_DMA_SIZE) ? 0U : size;
+    g_usart6_rx_dma_position =
+        (size == USART6_RX_DMA_SIZE) ? 0U : size;
   }
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-  if (huart->Instance == UART4)
+  if (huart->Instance == USART6)
   {
     ZAxisLink_OnUartError(huart->ErrorCode, HAL_GetTick());
-    g_uart4_rx_dma_position = 0U;
-    g_uart4_rx_restart_pending = 1U;
-    g_uart4_rx_last_restart_tick = HAL_GetTick();
+    g_usart6_rx_dma_position = 0U;
+    g_usart6_rx_restart_pending = 1U;
+    g_usart6_rx_last_restart_tick = HAL_GetTick();
     return;
   }
   if (huart->Instance != USART3) return;
@@ -518,70 +518,77 @@ HAL_StatusTypeDef USART3_TransmitAsync(const uint8_t *data, uint16_t length)
   return HAL_UART_Transmit_IT(&huart3, data, length);
 }
 
-HAL_StatusTypeDef UART4_TransmitDMA(const uint8_t *data, uint16_t length)
+HAL_StatusTypeDef USART6_TransmitDMA(const uint8_t *data, uint16_t length)
 {
   if ((data == NULL) || (length == 0U)) return HAL_ERROR;
-  return HAL_UART_Transmit_DMA(&huart4, data, length);
+  return HAL_UART_Transmit_DMA(&huart6, data, length);
 }
 
-HAL_StatusTypeDef UART4_StartRx(void)
+HAL_StatusTypeDef USART6_TransmitBlocking(const uint8_t *data, uint16_t length,
+                                          uint32_t timeout_ms)
+{
+  if ((data == NULL) || (length == 0U)) return HAL_ERROR;
+  return HAL_UART_Transmit(&huart6, data, length, timeout_ms);
+}
+
+HAL_StatusTypeDef USART6_StartRx(void)
 {
   HAL_StatusTypeDef status;
-  g_uart4_rx_dma_position = 0U;
-  g_uart4_rx_restart_pending = 0U;
+  g_usart6_rx_dma_position = 0U;
+  g_usart6_rx_restart_pending = 0U;
   ZAxisLink_ResetStream();
-  status = HAL_UARTEx_ReceiveToIdle_DMA(&huart4, g_uart4_rx_dma,
-                                        UART4_RX_DMA_SIZE);
+  status = HAL_UARTEx_ReceiveToIdle_DMA(&huart6, g_usart6_rx_dma,
+                                        USART6_RX_DMA_SIZE);
   if (status == HAL_OK) ZAxisLink_SetRxReady(1U);
   if (status != HAL_OK)
   {
-    g_uart4_rx_restart_pending = 1U;
-    g_uart4_rx_last_restart_tick = HAL_GetTick();
+    g_usart6_rx_restart_pending = 1U;
+    g_usart6_rx_last_restart_tick = HAL_GetTick();
     ZAxisLink_OnUartError(HAL_UART_ERROR_DMA, HAL_GetTick());
   }
   return status;
 }
 
-void UART4_RxPoll(void)
+void USART6_RxPoll(void)
 {
   HAL_StatusTypeDef status = HAL_OK;
   uint32_t now;
 
-  if (g_uart4_rx_restart_pending == 0U) return;
+  if (g_usart6_rx_restart_pending == 0U) return;
   now = HAL_GetTick();
-  if ((uint32_t)(now - g_uart4_rx_last_restart_tick) < 10U) return;
-  g_uart4_rx_last_restart_tick = now;
+  if ((uint32_t)(now - g_usart6_rx_last_restart_tick) < 10U) return;
+  g_usart6_rx_last_restart_tick = now;
 
-  HAL_NVIC_DisableIRQ(UART4_IRQn);
+  HAL_NVIC_DisableIRQ(USART6_IRQn);
   HAL_NVIC_DisableIRQ(DMA1_Stream1_IRQn);
-  (void)HAL_UART_AbortReceive(&huart4);
-  if (hdma_uart4_rx.State == HAL_DMA_STATE_BUSY)
+  (void)HAL_UART_AbortReceive(&huart6);
+  if (hdma_usart6_rx.State == HAL_DMA_STATE_BUSY)
   {
-    (void)HAL_DMA_Abort(&hdma_uart4_rx);
+    (void)HAL_DMA_Abort(&hdma_usart6_rx);
   }
-  if (hdma_uart4_rx.State != HAL_DMA_STATE_READY)
+  if (hdma_usart6_rx.State != HAL_DMA_STATE_READY)
   {
-    (void)HAL_DMA_DeInit(&hdma_uart4_rx);
-    status = HAL_DMA_Init(&hdma_uart4_rx);
-    if (status == HAL_OK) __HAL_LINKDMA(&huart4, hdmarx, hdma_uart4_rx);
+    (void)HAL_DMA_DeInit(&hdma_usart6_rx);
+    status = HAL_DMA_Init(&hdma_usart6_rx);
+    if (status == HAL_OK) __HAL_LINKDMA(&huart6, hdmarx, hdma_usart6_rx);
   }
   if (status == HAL_OK)
   {
-    __HAL_UART_CLEAR_FLAG(&huart4, UART_CLEAR_OREF | UART_CLEAR_NEF |
+    __HAL_UART_CLEAR_FLAG(&huart6, UART_CLEAR_OREF | UART_CLEAR_NEF |
                           UART_CLEAR_PEF | UART_CLEAR_FEF | UART_CLEAR_IDLEF);
-    __HAL_UART_SEND_REQ(&huart4, UART_RXDATA_FLUSH_REQUEST);
-    g_uart4_rx_dma_position = 0U;
+    __HAL_UART_SEND_REQ(&huart6, UART_RXDATA_FLUSH_REQUEST);
+    g_usart6_rx_dma_position = 0U;
     ZAxisLink_ResetStream();
-    status = HAL_UARTEx_ReceiveToIdle_DMA(&huart4, g_uart4_rx_dma,
-                                          UART4_RX_DMA_SIZE);
+    status = HAL_UARTEx_ReceiveToIdle_DMA(&huart6, g_usart6_rx_dma,
+                                          USART6_RX_DMA_SIZE);
   }
   HAL_NVIC_ClearPendingIRQ(DMA1_Stream1_IRQn);
-  HAL_NVIC_ClearPendingIRQ(UART4_IRQn);
+  HAL_NVIC_ClearPendingIRQ(USART6_IRQn);
   HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
-  HAL_NVIC_EnableIRQ(UART4_IRQn);
+  HAL_NVIC_EnableIRQ(USART6_IRQn);
   if (status == HAL_OK)
   {
-    g_uart4_rx_restart_pending = 0U;
+    g_usart6_rx_restart_pending = 0U;
     ZAxisLink_SetRxReady(1U);
   }
 }

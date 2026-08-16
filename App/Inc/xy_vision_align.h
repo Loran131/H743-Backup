@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include "xy_motor.h"
+#include "motion_coordinator.h"
 #include <stdint.h>
 
 #define XY_VISION_ALIGN_PERIOD_MS 470U
@@ -44,11 +45,15 @@ typedef struct {
     uint32_t start_tick;
     uint32_t last_sample_tick;
     uint32_t corrections;
+    MotionOwner owner;
+    int16_t target_pixel[2];
 } XY_VisionAlignStatus;
 
 void XY_VisionAlign_Init(uint32_t now);
 void XY_VisionAlign_Poll(uint32_t now);
 uint8_t XY_VisionAlign_Start(uint32_t now);
+uint8_t XY_VisionAlign_StartOwned(MotionOwner owner, int16_t target_x,
+                                  int16_t target_y, uint32_t now);
 void XY_VisionAlign_Abort(void);
 void XY_VisionAlign_GetStatus(XY_VisionAlignStatus *status);
 uint8_t XY_VisionAlign_IsActive(void);

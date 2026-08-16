@@ -33,6 +33,8 @@
 #include "iwdg.h"
 #include "led.h"
 #include "motion_coordinator.h"
+#include "mission_subflow.h"
+#include "mission_task.h"
 #include "shell.h"
 #include "smd.h"
 #include "usart.h"
@@ -192,6 +194,8 @@ void MX_FREERTOS_Init(void) {
   XY_VisionAlign_Init(HAL_GetTick());
   XZVisionAlign_Init(HAL_GetTick());
   MotionCoordinator_Init(HAL_GetTick());
+  MissionSubflow_Init(HAL_GetTick());
+  MissionTask_Init(HAL_GetTick());
 
   /* USER CODE END Init */
 
@@ -301,7 +305,7 @@ static void StartLegacyIoTask(void *argument)
   {
     USART3_RxPoll();
     C552_Poll(HAL_GetTick());
-    UART4_RxPoll();
+    USART6_RxPoll();
     ZAxisLink_Poll(HAL_GetTick());
     Shell_PollEmergency();
     MotionCoordinator_PollEmergency(HAL_GetTick());
@@ -328,6 +332,8 @@ static void StartLegacyIoTask(void *argument)
       }
       XY_Motor_Poll(HAL_GetTick());
       MotionCoordinator_Poll(HAL_GetTick());
+      MissionSubflow_Poll(HAL_GetTick());
+      MissionTask_Poll(HAL_GetTick());
       VisionCalibration_Poll(HAL_GetTick());
       XY_VisionAlign_Poll(HAL_GetTick());
       XZVisionAlign_Poll(HAL_GetTick());

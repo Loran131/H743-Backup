@@ -58,6 +58,8 @@ set(MX_Application_Src
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/xy_vision_align.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/motion_interfaces.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/motion_coordinator.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/mission_subflow.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/mission_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/z_axis_link.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/z_axis.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/xz_vision_calibration.c

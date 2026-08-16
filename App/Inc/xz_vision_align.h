@@ -7,6 +7,7 @@ extern "C" {
 
 #include "xy_motor.h"
 #include "z_axis.h"
+#include "motion_coordinator.h"
 #include <stdint.h>
 
 #define XZ_VISION_ALIGN_PERIOD_MS 470U
@@ -58,11 +59,16 @@ typedef struct {
     uint32_t start_tick;
     uint32_t last_sample_tick;
     uint32_t corrections;
+    MotionOwner owner;
+    int16_t target_pixel[2];
 } XZVisionAlignStatus;
 
 void XZVisionAlign_Init(uint32_t now);
 void XZVisionAlign_Poll(uint32_t now);
 uint8_t XZVisionAlign_Start(uint32_t now);
+uint8_t XZVisionAlign_StartOwned(MotionOwner owner, int16_t target_x,
+                                 int16_t target_y, uint8_t k230_mode,
+                                 uint32_t now);
 void XZVisionAlign_Abort(void);
 void XZVisionAlign_GetStatus(XZVisionAlignStatus *status);
 uint8_t XZVisionAlign_IsActive(void);

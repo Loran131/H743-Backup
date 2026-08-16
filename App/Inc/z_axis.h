@@ -19,6 +19,7 @@ typedef enum {
     Z_STATE_STARTING,
     Z_STATE_MOVING,
     Z_STATE_STOPPING,
+    Z_STATE_RECOVERING,
     Z_STATE_FAULT
 } ZAxisControlState;
 

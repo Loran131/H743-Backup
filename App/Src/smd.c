@@ -420,11 +420,6 @@ void smd_stop_now(uint8_t addr)
     smd_send_cmd(addr, FCT_STOP_NOW, NULL, 0);
 }
 
-void smd_clear_state(uint8_t addr)
-{
-    smd_send_cmd(addr, FCT_CLEAR_STATE, NULL, 0);
-}
-
 void smd_angle_to_zero(uint8_t addr)
 {
     smd_send_cmd(addr, FCT_ANGLE_ZERO, NULL, 0);

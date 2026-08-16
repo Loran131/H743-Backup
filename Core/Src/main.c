@@ -102,15 +102,15 @@ int main(void)
   MX_GPIO_Init();
   MX_USART3_UART_Init();
   MX_USART1_UART_Init();
-  MX_UART4_Init();
+  MX_USART6_UART_Init();
   MX_FDCAN2_Init();
   MX_I2C2_Init();
   MX_QUADSPI_Init();
   /* USER CODE BEGIN 2 */
   ZAxisLink_Init(HAL_GetTick());
-  if (UART4_StartRx() != HAL_OK)
+  if (USART6_StartRx() != HAL_OK)
   {
-    printf("Z axis UART4 RX DMA start failed; retry scheduled\r\n");
+    printf("Z axis USART6 RX DMA start failed; retry scheduled\r\n");
   }
   C552_Init(HAL_GetTick());
   if (USART3_StartRx() != HAL_OK)

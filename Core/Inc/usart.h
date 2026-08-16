@@ -36,11 +36,11 @@ extern UART_HandleTypeDef huart1;
 
 extern UART_HandleTypeDef huart3;
 
-extern UART_HandleTypeDef huart4;
+extern UART_HandleTypeDef huart6;
 
 extern DMA_HandleTypeDef hdma_usart3_rx;
-extern DMA_HandleTypeDef hdma_uart4_rx;
-extern DMA_HandleTypeDef hdma_uart4_tx;
+extern DMA_HandleTypeDef hdma_usart6_rx;
+extern DMA_HandleTypeDef hdma_usart6_tx;
 
 /* USER CODE BEGIN Private defines */
 
@@ -50,7 +50,7 @@ extern DMA_HandleTypeDef hdma_uart4_tx;
 
 void MX_USART1_UART_Init(void);
 void MX_USART3_UART_Init(void);
-void MX_UART4_Init(void);
+void MX_USART6_UART_Init(void);
 
 /* USER CODE BEGIN Prototypes */
 
@@ -60,9 +60,11 @@ uint8_t CLI_TakeAbortLine(void);
 HAL_StatusTypeDef USART3_StartRx(void);
 void USART3_RxPoll(void);
 HAL_StatusTypeDef USART3_TransmitAsync(const uint8_t *data, uint16_t length);
-HAL_StatusTypeDef UART4_TransmitDMA(const uint8_t *data, uint16_t length);
-HAL_StatusTypeDef UART4_StartRx(void);
-void UART4_RxPoll(void);
+HAL_StatusTypeDef USART6_TransmitDMA(const uint8_t *data, uint16_t length);
+HAL_StatusTypeDef USART6_TransmitBlocking(const uint8_t *data, uint16_t length,
+                                          uint32_t timeout_ms);
+HAL_StatusTypeDef USART6_StartRx(void);
+void USART6_RxPoll(void);
 
 /* USER CODE END Prototypes */
 

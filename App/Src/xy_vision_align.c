@@ -133,10 +133,20 @@ void XY_VisionAlign_Init(uint32_t now)
 
 uint8_t XY_VisionAlign_Start(uint32_t now)
 {
+    return XY_VisionAlign_StartOwned(MOTION_OWNER_XY_ALIGN,
+        g_xy_vision_calibration.reference_pixel[0],
+        g_xy_vision_calibration.reference_pixel[1], now);
+}
+
+uint8_t XY_VisionAlign_StartOwned(MotionOwner owner, int16_t target_x,
+                                  int16_t target_y, uint32_t now)
+{
     uint8_t required_mask =
         (g_xy_vision_calibration.k230_id == C552_ID_K230_2) ?
         C552_DEVICE_K230_2 : C552_DEVICE_K230_1;
-    if (MotionCoordinator_Acquire(MOTION_OWNER_XY_ALIGN,
+    if ((owner != MOTION_OWNER_XY_ALIGN) &&
+        (owner != MOTION_OWNER_MISSION)) return 0U;
+    if (MotionCoordinator_Acquire(owner,
                                   required_mask, now) == 0U) return 0U;
     if ((g_align.state == XY_VISION_ALIGN_WAIT_SAMPLE) ||
         (g_align.state == XY_VISION_ALIGN_MOVE_X) ||
@@ -161,17 +171,21 @@ uint8_t XY_VisionAlign_Start(uint32_t now)
     g_align.last_sample_tick = now;
     g_align.failed_axis = XY_AXIS_COUNT;
     g_align.last_move_result = XY_RESULT_OK;
+    g_align.owner = owner;
+    g_align.target_pixel[0] = target_x;
+    g_align.target_pixel[1] = target_y;
     g_next_decision_tick = now;
     g_last_decision_seq = 0U;
     return 1U;
 
 reject:
-    MotionCoordinator_Release(MOTION_OWNER_XY_ALIGN, now);
+    if (owner != MOTION_OWNER_MISSION) MotionCoordinator_Release(owner, now);
     return 0U;
 }
 
 void XY_VisionAlign_Abort(void)
 {
+    MotionOwner owner = g_align.owner;
     if (XY_VisionAlign_IsActive() != 0U) {
         XY_AxisStatus x;
         XY_AxisStatus y;
@@ -186,6 +200,10 @@ void XY_VisionAlign_Abort(void)
     }
     g_align.state = XY_VISION_ALIGN_IDLE;
     g_align.fault = XY_VISION_ALIGN_FAULT_NONE;
+    if ((owner != MOTION_OWNER_NONE) &&
+        (owner != MOTION_OWNER_MISSION)) {
+        MotionCoordinator_Release(owner, HAL_GetTick());
+    }
 }
 
 void XY_VisionAlign_Poll(uint32_t now)
@@ -254,10 +272,8 @@ void XY_VisionAlign_Poll(uint32_t now)
         (sensor.sample_seq == g_last_decision_seq)) return;
     g_last_decision_seq = sensor.sample_seq;
 
-    error_x = (int16_t)(g_xy_vision_calibration.reference_pixel[0] -
-                        sensor.center_x);
-    error_y = (int16_t)(g_xy_vision_calibration.reference_pixel[1] -
-                        sensor.center_y);
+    error_x = (int16_t)(g_align.target_pixel[0] - sensor.center_x);
+    error_y = (int16_t)(g_align.target_pixel[1] - sensor.center_y);
     g_align.error_pixel[0] = error_x;
     g_align.error_pixel[1] = error_y;
     if ((align_in_deadzone(error_x) != 0U) &&

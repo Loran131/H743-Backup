@@ -113,7 +113,6 @@ extern "C" {
 #define FCT_ANGLE_ZERO          0xF8
 #define FCT_CLEAR_CLOG_PRO      0xF9
 #define FCT_MOTOR_ENABLE        0xFA
-#define FCT_CLEAR_STATE         0xFB
 #define FCT_STOP_NOW            0xFC
 
 /* ====================== RESPONSE STRUCTURES =============================== */
@@ -228,7 +227,6 @@ void smd_origin_auto_zero(uint8_t addr, uint8_t enable);
 /* ---- Convenience API: Motion Control ---- */
 void smd_motor_enable(uint8_t addr, uint8_t enable);
 void smd_stop_now(uint8_t addr);
-void smd_clear_state(uint8_t addr);
 void smd_angle_to_zero(uint8_t addr);
 
 /* Closed-loop relative position move */

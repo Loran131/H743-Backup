@@ -27,6 +27,7 @@ static uint16_t g_wait_sample_seq;
 static uint8_t g_wait_sample_initialized;
 static uint32_t g_next_decision_tick;
 static uint32_t g_mode_deadline;
+static C552_K230Mode g_k230_mode;
 
 static int32_t align_round_float(float value)
 {
@@ -163,14 +164,33 @@ void XZVisionAlign_Init(uint32_t now)
     g_align.last_z_result = Z_RESULT_OK;
     g_next_decision_tick = now;
     g_mode_deadline = now;
+    g_k230_mode = C552_K230_MODE_RED_BLOCK;
     g_wait_sample_seq = 0U;
     g_wait_sample_initialized = 0U;
 }
 
 uint8_t XZVisionAlign_Start(uint32_t now)
 {
+    return XZVisionAlign_StartOwned(MOTION_OWNER_P4_XZ_ALIGN,
+        g_xz_vision_calibration.reference_pixel[0],
+        g_xz_vision_calibration.reference_pixel[1],
+        C552_K230_MODE_RED_BLOCK, now);
+}
+
+uint8_t XZVisionAlign_StartOwned(MotionOwner owner, int16_t target_x,
+                                 int16_t target_y, uint8_t k230_mode,
+                                 uint32_t now)
+{
+    C552_CommandStatus command;
+    C552_K230Data sensor;
     C552_RequestResult request;
-    if (MotionCoordinator_Acquire(MOTION_OWNER_P4_XZ_ALIGN,
+    uint8_t mode_applied;
+    uint8_t sample_ready;
+    if ((owner != MOTION_OWNER_P4_XZ_ALIGN) &&
+        (owner != MOTION_OWNER_MISSION)) return 0U;
+    if ((k230_mode != C552_K230_MODE_APRILTAG) &&
+        (k230_mode != C552_K230_MODE_RED_BLOCK)) return 0U;
+    if (MotionCoordinator_Acquire(owner,
                                   C552_DEVICE_K230_2, now) == 0U) return 0U;
     if ((XZVisionAlign_IsActive() != 0U) ||
         (VisionCalibration_IsActive() != 0U) ||
@@ -191,38 +211,61 @@ uint8_t XZVisionAlign_Start(uint32_t now)
         goto reject;
     }
 
-    request = C552_SetK230Mode(C552_ID_K230_2,
-                               C552_K230_MODE_RED_BLOCK, now);
-    if (request != C552_REQUEST_OK) {
-        g_align.fault = (request == C552_REQUEST_BUSY) ?
-                        XZ_VISION_ALIGN_FAULT_BUSY :
-                        XZ_VISION_ALIGN_FAULT_MODE;
-        g_align.state = XZ_VISION_ALIGN_FAULT;
-        goto reject;
+    C552_GetCommandStatus(&command);
+    mode_applied = ((command.id == C552_ID_K230_2) &&
+                    (command.command == C552_COMMAND_SET_K230_MODE) &&
+                    (command.requested_value == k230_mode) &&
+                    (command.state == C552_COMMAND_APPLIED)) ? 1U : 0U;
+    if (mode_applied == 0U) {
+        request = C552_SetK230Mode(C552_ID_K230_2,
+                                   (C552_K230Mode)k230_mode, now);
+        if (request != C552_REQUEST_OK) {
+            g_align.fault = (request == C552_REQUEST_BUSY) ?
+                            XZ_VISION_ALIGN_FAULT_BUSY :
+                            XZ_VISION_ALIGN_FAULT_MODE;
+            g_align.state = XZ_VISION_ALIGN_FAULT;
+            goto reject;
+        }
     }
 
     memset(&g_align, 0, sizeof(g_align));
-    g_align.state = XZ_VISION_ALIGN_WAIT_RED_MODE;
+    g_align.state = (mode_applied != 0U) ?
+                    XZ_VISION_ALIGN_WAIT_RED_SAMPLE :
+                    XZ_VISION_ALIGN_WAIT_RED_MODE;
     g_align.start_tick = now;
     g_align.last_sample_tick = now;
     g_align.last_x_result = XY_RESULT_OK;
     g_align.last_z_result = Z_RESULT_OK;
+    g_align.owner = owner;
+    g_align.target_pixel[0] = target_x;
+    g_align.target_pixel[1] = target_y;
+    g_k230_mode = (C552_K230Mode)k230_mode;
     g_next_decision_tick = now;
     g_mode_deadline = now + XZ_ALIGN_MODE_TIMEOUT_MS;
     g_wait_sample_seq = 0U;
     g_wait_sample_initialized = 0U;
+    if (mode_applied != 0U) {
+        sample_ready = align_get_red_sample(&sensor);
+        g_wait_sample_seq = (sample_ready != 0U) ? sensor.sample_seq : 0U;
+        g_wait_sample_initialized = sample_ready;
+    }
     return 1U;
 
 reject:
-    MotionCoordinator_Release(MOTION_OWNER_P4_XZ_ALIGN, now);
+    if (owner != MOTION_OWNER_MISSION) MotionCoordinator_Release(owner, now);
     return 0U;
 }
 
 void XZVisionAlign_Abort(void)
 {
+    MotionOwner owner = g_align.owner;
     if (XZVisionAlign_IsActive() != 0U) align_stop_axes();
     g_align.state = XZ_VISION_ALIGN_IDLE;
     g_align.fault = XZ_VISION_ALIGN_FAULT_NONE;
+    if ((owner != MOTION_OWNER_NONE) &&
+        (owner != MOTION_OWNER_MISSION)) {
+        MotionCoordinator_Release(owner, HAL_GetTick());
+    }
 }
 
 void XZVisionAlign_Poll(uint32_t now)
@@ -257,7 +300,7 @@ void XZVisionAlign_Poll(uint32_t now)
         C552_GetCommandStatus(&command);
         if ((command.id == C552_ID_K230_2) &&
             (command.command == C552_COMMAND_SET_K230_MODE) &&
-            (command.requested_value == C552_K230_MODE_RED_BLOCK) &&
+            (command.requested_value == (uint8_t)g_k230_mode) &&
             (command.state == C552_COMMAND_APPLIED)) {
             g_wait_sample_seq = (sample_ready != 0U) ? sensor.sample_seq : 0U;
             g_wait_sample_initialized = sample_ready;
@@ -296,9 +339,9 @@ void XZVisionAlign_Poll(uint32_t now)
         break;
 
     case XZ_VISION_ALIGN_CALCULATE_ERROR: {
-        int32_t error_x = (int32_t)g_xz_vision_calibration.reference_pixel[0] -
+        int32_t error_x = (int32_t)g_align.target_pixel[0] -
                           g_align.decision_pixel[0];
-        int32_t error_y = (int32_t)g_xz_vision_calibration.reference_pixel[1] -
+        int32_t error_y = (int32_t)g_align.target_pixel[1] -
                           g_align.decision_pixel[1];
         float raw_x;
         float raw_z;

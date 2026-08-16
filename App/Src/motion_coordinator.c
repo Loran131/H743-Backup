@@ -12,6 +12,7 @@
 
 static MotionCoordinatorStatus g_motion;
 static volatile uint8_t g_abort_request;
+static volatile MotionOwner g_cancel_request;
 static uint8_t g_idle_required_mask = C552_DEVICE_REQUIRED_DEFAULT;
 static uint8_t g_xy_stop_sent;
 static uint32_t g_z_fault_count_at_acquire;
@@ -43,7 +44,7 @@ static uint8_t owner_task_active(MotionOwner owner)
     }
 }
 
-static uint8_t axes_faulted(void)
+static uint8_t owner_axis_faulted(MotionOwner owner)
 {
     XY_AxisStatus x;
     XY_AxisStatus y;
@@ -51,16 +52,19 @@ static uint8_t axes_faulted(void)
     if ((XY_GetStatus(XY_AXIS_X, &x) == 0U) ||
         (XY_GetStatus(XY_AXIS_Y, &y) == 0U)) return 1U;
     ZAxis_GetControlStatus(&z);
-    return ((x.state == XY_STATE_FAULT) || (y.state == XY_STATE_FAULT) ||
-            (z.state == Z_STATE_FAULT)) ? 1U : 0U;
-}
-
-static uint8_t monitored_axis_faulted(void)
-{
-    ZAxisControlStatus z;
-    ZAxis_GetControlStatus(&z);
-    return ((axes_faulted() != 0U) ||
-            (z.fault_count != g_z_fault_count_at_acquire)) ? 1U : 0U;
+    switch (owner) {
+    case MOTION_OWNER_P2_CALIBRATION:
+    case MOTION_OWNER_XY_ALIGN:
+        return ((x.state == XY_STATE_FAULT) ||
+                (y.state == XY_STATE_FAULT)) ? 1U : 0U;
+    case MOTION_OWNER_P3_CALIBRATION:
+    case MOTION_OWNER_P4_XZ_ALIGN:
+        return ((x.state == XY_STATE_FAULT) ||
+                (z.state == Z_STATE_FAULT) ||
+                (z.fault_count != g_z_fault_count_at_acquire)) ? 1U : 0U;
+    default:
+        return 0U;
+    }
 }
 
 static uint8_t axes_stopped(void)
@@ -81,7 +85,8 @@ static uint8_t axes_stopped(void)
              (y.state != XY_STATE_HOMING)) &&
             ((z.state != Z_STATE_STARTING) &&
              (z.state != Z_STATE_MOVING) &&
-             (z.state != Z_STATE_STOPPING))) ? 1U : 0U;
+             (z.state != Z_STATE_STOPPING) &&
+             (z.state != Z_STATE_RECOVERING))) ? 1U : 0U;
 }
 
 static void abort_all_tasks(void)
@@ -121,6 +126,7 @@ void MotionCoordinator_Init(uint32_t now)
 {
     memset(&g_motion, 0, sizeof(g_motion));
     g_abort_request = 0U;
+    g_cancel_request = MOTION_OWNER_NONE;
     g_motion.owner = MOTION_OWNER_NONE;
     g_motion.owner_since_tick = now;
     g_motion.required_mask = g_idle_required_mask;
@@ -144,6 +150,7 @@ void MotionCoordinator_Poll(uint32_t now)
     MotionOwner owner = g_motion.owner;
     if (g_abort_request != 0U) {
         g_abort_request = 0U;
+        g_cancel_request = MOTION_OWNER_NONE;
         g_motion.latch_reason = MOTION_LATCH_ABORT;
         ++g_motion.abort_count;
         abort_all_tasks();
@@ -152,17 +159,43 @@ void MotionCoordinator_Poll(uint32_t now)
         g_motion.required_mask = g_idle_required_mask;
         (void)C552_SetRequiredMask(g_idle_required_mask);
         if (g_motion.stop_pending == 0U) begin_stop(now);
-    } else if ((g_motion.latch_reason == MOTION_LATCH_NONE) &&
-               (owner != MOTION_OWNER_NONE) &&
-               (monitored_axis_faulted() != 0U)) {
-        g_motion.latch_reason = MOTION_LATCH_AXIS_FAULT;
+    } else if ((owner != MOTION_OWNER_NONE) &&
+               (owner != MOTION_OWNER_MANUAL) &&
+               (owner != MOTION_OWNER_MISSION) &&
+               (owner_axis_faulted(owner) != 0U)) {
+        g_cancel_request = MOTION_OWNER_NONE;
         ++g_motion.axis_fault_count;
         abort_all_tasks();
         g_motion.owner = MOTION_OWNER_NONE;
         g_motion.owner_since_tick = now;
         g_motion.required_mask = g_idle_required_mask;
         (void)C552_SetRequiredMask(g_idle_required_mask);
-        begin_stop(now);
+    }
+
+    if ((g_abort_request == 0U) &&
+        (g_cancel_request != MOTION_OWNER_NONE)) {
+        MotionOwner cancel = g_cancel_request;
+        g_cancel_request = MOTION_OWNER_NONE;
+        if ((g_motion.owner == cancel) ||
+            (g_motion.owner == MOTION_OWNER_NONE)) {
+            switch (cancel) {
+            case MOTION_OWNER_P2_CALIBRATION:
+                VisionCalibration_Abort();
+                break;
+            case MOTION_OWNER_P3_CALIBRATION:
+                XZCalibration_Abort();
+                break;
+            case MOTION_OWNER_XY_ALIGN:
+                XY_VisionAlign_Abort();
+                break;
+            case MOTION_OWNER_P4_XZ_ALIGN:
+                XZVisionAlign_Abort();
+                break;
+            default:
+                break;
+            }
+            MotionCoordinator_Release(cancel, now);
+        }
     }
 
     if (g_motion.stop_pending != 0U) poll_stop();
@@ -190,6 +223,7 @@ uint8_t MotionCoordinator_Acquire(MotionOwner owner, uint8_t required_mask,
     primask = __get_PRIMASK();
     __disable_irq();
     if ((g_abort_request == 0U) &&
+        (g_cancel_request != owner) &&
         (g_motion.latch_reason == MOTION_LATCH_NONE) &&
         ((g_motion.owner == MOTION_OWNER_NONE) ||
          (g_motion.owner == owner))) {
@@ -253,16 +287,13 @@ void MotionCoordinator_RequestAbort(void)
     g_abort_request = 1U;
 }
 
-uint8_t MotionCoordinator_Resume(uint32_t now)
+void MotionCoordinator_RequestCancel(MotionOwner owner)
 {
-    if ((g_abort_request != 0U) || (g_motion.stop_pending != 0U) ||
-        (axes_faulted() != 0U) ||
-        (axes_stopped() == 0U)) return 0U;
-    g_motion.latch_reason = MOTION_LATCH_NONE;
-    g_motion.gripper_frozen = 0U;
-    g_motion.manual_hold = 0U;
-    g_motion.latch_tick = now;
-    return 1U;
+    if ((owner != MOTION_OWNER_NONE) &&
+        (owner != MOTION_OWNER_MANUAL) &&
+        (owner != MOTION_OWNER_MISSION)) {
+        g_cancel_request = owner;
+    }
 }
 
 uint8_t MotionCoordinator_CaptureSnapshot(MotionPositionSnapshot *snapshot,
@@ -317,7 +348,7 @@ const char *MotionCoordinator_OwnerString(MotionOwner owner)
 
 const char *MotionCoordinator_LatchString(MotionLatchReason reason)
 {
-    static const char *const names[] = {"NONE", "ABORT", "AXIS_FAULT"};
+    static const char *const names[] = {"NONE", "ABORT"};
     return ((uint32_t)reason < (sizeof(names) / sizeof(names[0]))) ?
            names[reason] : "UNKNOWN";
 }

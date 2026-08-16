@@ -11,8 +11,12 @@
 #define Z_AXIS_PAYLOAD_SIZE         10U
 #define Z_AXIS_COMMAND_MOVE         0x01U
 #define Z_AXIS_COMMAND_STOP         0x02U
+#define Z_AXIS_COMMAND_CLEAR_FAULT  0x03U
+#define Z_AXIS_COMMAND_QUERY_STATUS 0x04U
 #define Z_AXIS_RESPONSE_MOVE        0x81U
 #define Z_AXIS_RESPONSE_STOP        0x82U
+#define Z_AXIS_RESPONSE_CLEAR_FAULT 0x83U
+#define Z_AXIS_RESPONSE_QUERY_STATUS 0x84U
 #define Z_AXIS_STATUS_ACCEPTED      0x00U
 #define Z_AXIS_STATUS_COMPLETE      0x01U
 #define Z_AXIS_STATUS_STOPPED       0x07U
@@ -29,6 +33,8 @@ static volatile uint32_t g_deadline;
 static volatile uint8_t g_deadline_active;
 static volatile uint8_t g_active_direction;
 static volatile uint8_t g_stop_ack_received;
+static volatile uint32_t g_requested_speed_hz;
+static volatile uint32_t g_requested_steps;
 
 static void publish_motion_result(uint8_t status, uint32_t steps)
 {
@@ -46,6 +52,13 @@ static void publish_motion_result(uint8_t status, uint32_t steps)
     g_status.motion_result_status = status;
     ++g_status.motion_result_seq;
     g_status.move_active = 0U;
+}
+
+static void publish_recovery_result(uint8_t status, uint32_t fault_status)
+{
+    g_status.recovery_result_status = status;
+    g_status.controller_fault_status = fault_status;
+    ++g_status.recovery_result_seq;
 }
 
 static uint16_t crc16_modbus(const uint8_t *data, uint16_t length)
@@ -125,6 +138,35 @@ static void handle_response(const uint8_t *frame, uint32_t now)
     g_status.last_response_tick = now;
     ++g_status.valid_frames;
 
+    if (command == Z_AXIS_RESPONSE_CLEAR_FAULT) {
+        if (state != Z_AXIS_STATE_WAIT_CLEAR_FAULT) {
+            ++g_status.unexpected_frames;
+            return;
+        }
+        g_status.controller_fault_status = g_status.completed_steps;
+        if (status == Z_AXIS_STATUS_COMPLETE) {
+            g_status.state = Z_AXIS_STATE_RECOVERY_VERIFY;
+            set_deadline(now, Z_AXIS_ACK_TIMEOUT_MS);
+        } else {
+            publish_recovery_result(status, g_status.completed_steps);
+            g_status.state = Z_AXIS_STATE_FAULT;
+            g_deadline_active = 0U;
+        }
+        return;
+    }
+
+    if (command == Z_AXIS_RESPONSE_QUERY_STATUS) {
+        if (state != Z_AXIS_STATE_WAIT_QUERY_STATUS) {
+            ++g_status.unexpected_frames;
+            return;
+        }
+        publish_recovery_result(status, g_status.completed_steps);
+        g_deadline_active = 0U;
+        g_status.state = (status == Z_AXIS_STATUS_COMPLETE) ?
+                         Z_AXIS_STATE_IDLE : Z_AXIS_STATE_FAULT;
+        return;
+    }
+
     if ((command != Z_AXIS_RESPONSE_MOVE) &&
         (command != Z_AXIS_RESPONSE_STOP)) {
         ++g_status.unexpected_frames;
@@ -164,6 +206,7 @@ static void handle_response(const uint8_t *frame, uint32_t now)
     }
     if ((status == Z_AXIS_STATUS_ACCEPTED) &&
         (state == Z_AXIS_STATE_WAIT_ACCEPT)) {
+        g_status.move_accepted = 1U;
         if ((g_status.actual_speed_hz < Z_AXIS_MIN_SPEED_HZ) ||
             (g_status.actual_speed_hz > Z_AXIS_MAX_SPEED_HZ) ||
             (g_status.completed_steps == 0U)) {
@@ -185,6 +228,11 @@ static void handle_response(const uint8_t *frame, uint32_t now)
             g_deadline_active = 0U;
         }
     } else {
+        if ((g_status.move_accepted != 0U) &&
+            ((state == Z_AXIS_STATE_MOVING) ||
+             (state == Z_AXIS_STATE_STOPPING))) {
+            publish_motion_result(status, g_status.completed_steps);
+        }
         g_status.state = Z_AXIS_STATE_FAULT;
         g_deadline_active = 0U;
     }
@@ -199,6 +247,8 @@ void ZAxisLink_Init(uint32_t now)
     g_deadline_active = 0U;
     g_active_direction = 0U;
     g_stop_ack_received = 0U;
+    g_requested_speed_hz = 0U;
+    g_requested_steps = 0U;
     ZAxisLink_ResetStream();
 }
 
@@ -215,7 +265,7 @@ ZAxisRequestResult ZAxisLink_MoveRelative(int32_t pulses,
     }
     if ((g_status.rx_ready == 0U) ||
         (g_status.state != Z_AXIS_STATE_IDLE) ||
-        (huart4.gState != HAL_UART_STATE_READY)) {
+        (huart6.gState != HAL_UART_STATE_READY)) {
         return Z_AXIS_REQUEST_BUSY;
     }
 
@@ -224,10 +274,13 @@ ZAxisRequestResult ZAxisLink_MoveRelative(int32_t pulses,
     build_frame(Z_AXIS_COMMAND_MOVE, (pulses > 0) ? 1U : 0U,
                 speed_hz, steps);
     g_active_direction = (pulses < 0) ? 1U : 0U;
+    g_requested_speed_hz = speed_hz;
+    g_requested_steps = steps;
     g_status.move_active = 1U;
+    g_status.move_accepted = 0U;
     g_status.state = Z_AXIS_STATE_WAIT_ACCEPT;
     set_deadline(now, Z_AXIS_ACK_TIMEOUT_MS);
-    if (UART4_TransmitDMA(g_tx_frame, sizeof(g_tx_frame)) != HAL_OK) {
+    if (USART6_TransmitDMA(g_tx_frame, sizeof(g_tx_frame)) != HAL_OK) {
         g_status.state = Z_AXIS_STATE_IDLE;
         g_status.move_active = 0U;
         g_deadline_active = 0U;
@@ -239,14 +292,14 @@ ZAxisRequestResult ZAxisLink_MoveRelative(int32_t pulses,
 ZAxisRequestResult ZAxisLink_Stop(uint32_t now)
 {
     if ((g_status.rx_ready == 0U) ||
-        (huart4.gState != HAL_UART_STATE_READY)) {
+        (huart6.gState != HAL_UART_STATE_READY)) {
         return Z_AXIS_REQUEST_BUSY;
     }
     build_frame(Z_AXIS_COMMAND_STOP, 0U, 0U, 0U);
     g_stop_ack_received = 0U;
     g_status.state = Z_AXIS_STATE_STOPPING;
     set_deadline(now, Z_AXIS_ACK_TIMEOUT_MS);
-    if (UART4_TransmitDMA(g_tx_frame, sizeof(g_tx_frame)) != HAL_OK) {
+    if (USART6_TransmitDMA(g_tx_frame, sizeof(g_tx_frame)) != HAL_OK) {
         g_status.state = Z_AXIS_STATE_FAULT;
         g_deadline_active = 0U;
         return Z_AXIS_REQUEST_IO_ERROR;
@@ -297,6 +350,19 @@ void ZAxisLink_ProcessBytes(const uint8_t *data, uint16_t length,
 
 void ZAxisLink_Poll(uint32_t now)
 {
+    if ((g_status.state == Z_AXIS_STATE_RECOVERY_VERIFY) &&
+        (g_status.rx_ready != 0U) &&
+        (huart6.gState == HAL_UART_STATE_READY)) {
+        build_frame(Z_AXIS_COMMAND_QUERY_STATUS, 0U, 0U, 0U);
+        g_status.state = Z_AXIS_STATE_WAIT_QUERY_STATUS;
+        set_deadline(now, Z_AXIS_ACK_TIMEOUT_MS);
+        if (USART6_TransmitDMA(g_tx_frame, sizeof(g_tx_frame)) != HAL_OK) {
+            publish_recovery_result(0xFFU,
+                                    g_status.controller_fault_status);
+            g_status.state = Z_AXIS_STATE_FAULT;
+            g_deadline_active = 0U;
+        }
+    }
     if ((g_deadline_active != 0U) &&
         ((int32_t)(now - g_deadline) >= 0)) {
         g_deadline_active = 0U;
@@ -317,27 +383,48 @@ void ZAxisLink_GetStatus(ZAxisStatus *status)
 
 void ZAxisLink_OnUartError(uint32_t error_code, uint32_t now)
 {
-    (void)error_code;
     ++g_status.uart_errors;
+    if ((error_code & HAL_UART_ERROR_ORE) != 0U) ++g_status.uart_ore_errors;
+    if ((error_code & HAL_UART_ERROR_FE) != 0U) ++g_status.uart_fe_errors;
+    if ((error_code & HAL_UART_ERROR_NE) != 0U) ++g_status.uart_ne_errors;
+    if ((error_code & HAL_UART_ERROR_PE) != 0U) ++g_status.uart_pe_errors;
+    if ((error_code & HAL_UART_ERROR_DMA) != 0U) ++g_status.uart_dma_errors;
+    g_status.last_uart_error_code = error_code;
     g_status.rx_ready = 0U;
     g_status.last_response_tick = now;
-    if (g_status.state != Z_AXIS_STATE_IDLE) {
-        g_status.state = Z_AXIS_STATE_FAULT;
+
+    if ((g_status.state == Z_AXIS_STATE_WAIT_ACCEPT) &&
+        (g_requested_speed_hz != 0U) && (g_requested_steps != 0U)) {
+        /* The command may already be executing even if ACCEPTED was damaged.
+           Wait for COMPLETE; never retransmit a relative move automatically. */
+        set_deadline(now, completion_timeout(g_requested_steps,
+                                             g_requested_speed_hz));
     }
-    g_deadline_active = 0U;
+
+    /* RX DMA is restarted by USART6_RxPoll. Keep the active transaction and
+       its deadline so a valid response after resynchronization can finish it. */
     ZAxisLink_ResetStream();
 }
 
-void ZAxisLink_ClearFault(void)
+ZAxisRequestResult ZAxisLink_ClearFault(uint32_t now)
 {
-    if ((g_status.rx_ready != 0U) &&
-        (g_status.state == Z_AXIS_STATE_FAULT)) {
-        g_status.state = Z_AXIS_STATE_IDLE;
-        g_status.move_active = 0U;
-        g_stop_ack_received = 0U;
-        g_stop_ack_received = 0U;
-        g_deadline_active = 0U;
+    if ((g_status.rx_ready == 0U) ||
+        ((g_status.state != Z_AXIS_STATE_FAULT) &&
+         (g_status.state != Z_AXIS_STATE_IDLE)) ||
+        (huart6.gState != HAL_UART_STATE_READY)) {
+        return Z_AXIS_REQUEST_BUSY;
     }
+    build_frame(Z_AXIS_COMMAND_CLEAR_FAULT, 0U, 0U, 0U);
+    g_status.move_active = 0U;
+    g_stop_ack_received = 0U;
+    g_status.state = Z_AXIS_STATE_WAIT_CLEAR_FAULT;
+    set_deadline(now, Z_AXIS_ACK_TIMEOUT_MS);
+    if (USART6_TransmitDMA(g_tx_frame, sizeof(g_tx_frame)) != HAL_OK) {
+        g_status.state = Z_AXIS_STATE_FAULT;
+        g_deadline_active = 0U;
+        return Z_AXIS_REQUEST_IO_ERROR;
+    }
+    return Z_AXIS_REQUEST_OK;
 }
 
 void ZAxisLink_SetRxReady(uint8_t ready)
@@ -357,6 +444,9 @@ const char *ZAxisLink_StateString(ZAxisState state)
         case Z_AXIS_STATE_WAIT_ACCEPT: return "WAIT_ACCEPT";
         case Z_AXIS_STATE_MOVING: return "MOVING";
         case Z_AXIS_STATE_STOPPING: return "STOPPING";
+        case Z_AXIS_STATE_WAIT_CLEAR_FAULT: return "WAIT_CLEAR_FAULT";
+        case Z_AXIS_STATE_RECOVERY_VERIFY: return "RECOVERY_VERIFY";
+        case Z_AXIS_STATE_WAIT_QUERY_STATUS: return "WAIT_QUERY_STATUS";
         case Z_AXIS_STATE_FAULT: return "FAULT";
         default: return "UNKNOWN";
     }

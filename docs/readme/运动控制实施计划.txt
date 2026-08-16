@@ -1,10 +1,11 @@
 STM32H743 三轴运动、校准与任务状态机实施计划
 =============================================
 
-版本：V1.0
-日期：2026-08-13
-状态：P1已完成，P2第一版已完成首次板测
-关联文档：工程导航.md、运动方案.txt、滤波方案_H743端.txt、C552通信协议v2.txt
+版本：V1.1
+日期：2026-08-16
+状态：P7中 red_pick、red_find、tag_put 完整流程已通过，frame_put 待完成
+关联文档：../接替者阅读顺序.md、../legacy-migration-status.md、工程导航.md、
+运动方案.txt、../C552通信协议v3.md、../K230串口协议.md
 
 
 一、目标和边界
@@ -14,7 +15,7 @@ STM32H743 三轴运动、校准与任务状态机实施计划
 
 1. X轴：PD42S1，FDCAN2，电机地址1，丝杠传动；
 2. Y轴：PD42S1，FDCAN2，电机地址2，齿轮传动；
-3. Z轴：独立MCU控制DRV8711，H743通过UART4发送17字节二进制帧；
+3. Z轴：独立MCU控制DRV8711，H743通过USART6发送17字节二进制帧；
 4. C552：负责TOF、K230和夹爪，H743按任务模式选择需要的数据；
 5. USART1：初期作为人工调试、任务下发、接收ACK和校准入口；
 6. axis.c、servo.c、stepper.c、buzzer.c保留在磁盘，但不作为当前控制架构；
@@ -30,7 +31,7 @@ STM32H743 三轴运动、校准与任务状态机实施计划
 轴  底层/地址       传动方式  当前推荐速度          当前可确认的单位       状态
 X   PD42S1/ID=1     丝杠      3000                  RPM                  暂定，需测量
 Y   PD42S1/ID=2     齿轮      5~10                  RPM                  暂定，先从5开始
-Z   UART4/DRV8711   STEP/DIR  90,000 Hz（推荐值）    STEP脉冲频率          已确认
+Z   USART6/DRV8711  STEP/DIR  90,000 Hz（推荐值）    STEP脉冲频率          已确认
 
 现有smd.c已明确：相对位置函数speed_rpm范围为0~3000 RPM，pulses为脉冲数，
 51200脉冲等于电机一圈。因此X=3000和Y=5~10的单位就是RPM，不是未知单位。
@@ -76,7 +77,7 @@ xy_motor.c/.h
     -> 不提供可任意输入地址的自动控制API
 
 z_axis_link.c/.h
-    -> UART4 115200 8N1
+    -> USART6 9600 8N1，PC6 TX / PC7 RX
     -> 17字节固定帧、CRC16/MODBUS、小端整数
     -> 单命令在途，管理接受ACK和完成ACK
 
@@ -113,26 +114,26 @@ P0 需求与接口冻结
 完成条件：协议和接口文档不再有单位、范围或停止语义歧义。
 
 
-P1 工程清理和UART4启用
+P1 工程清理和Z轴串口启用
 
-状态：已完成（2026-08-11）。Keil ARMClang 6.23全量编译0错误0警告，链接映像无buzzer对象，
-main已链接并调用MX_UART4_Init()。
+状态：历史阶段已完成；随后 Z 轴链路已从 UART4 迁移到 USART6。当前以
+`MX_USART6_UART_Init()`、9600 8N1、PC6 TX / PC7 RX 为准。
 
 工作：
 - main删除蜂鸣器include、初始化、启动提示音和Tick；
 - shell删除beep、beep_ubur及帮助；
 - buzzer.c退出Keil编译但原文件保留；
 - main不再初始化TIM4；
-- main调用MX_UART4_Init()；
-- 保持UART4为115200、8数据位、无校验、1停止位；
-- 记录UART4引脚PA11 RX、PA12 TX。
+- main调用 `MX_USART6_UART_Init()`；
+- USART6 使用9600、8数据位、无校验、1停止位；
+- USART6引脚为PC6 TX、PC7 RX。
 
 解决的问题：
 - 清除无用蜂鸣器运行路径；
 - 为Z轴协议准备独占串口；
-- 避免100.ioc中的历史FDCAN1配置被误认为当前PA11/PA12用途。
+- 避免 `TestH743.ioc` 中的历史配置被误认为当前PA11/PA12用途。
 
-完成条件：Keil全量编译0错误0警告；链接映像无buzzer对象；主程序启动UART4。
+完成条件：CMake Debug构建成功；主程序启动USART6并可与F103双向收发。
 
 
 P2 Z轴二进制协议层
@@ -141,7 +142,7 @@ P2 Z轴二进制协议层
 - 实现CRC16/MODBUS；
 - 实现命令帧编码；
 - 实现固定17字节滑动同步解析器；
-- 实现UART4非阻塞接收；
+- 实现USART6 DMA非阻塞接收；
 - 管理STATUS=00接受、01完成、02~06错误；
 - 记录请求速度、请求步数、完成步数和应答年龄；
 - 实现超时、重同步和错误统计。
@@ -239,13 +240,13 @@ P6 C552双向协议
 完成条件：50 Hz持续运行，无RS485碰撞，模式切换后不会使用旧配置的样本。
 
 
-P7 PID对正
+P4 视觉对正（当前第一版离散 P 控制）
 
-当前进展（2026-08-13）：已实现下视 K230 的第一版 XY 离散对正。控制器使用 P2 的逆矩阵，
+当前进展：已实现下视 K230 的第一版 XY 离散对正。控制器使用 P2 的逆矩阵，
 470 ms 最多决策一次，采用 0.5 比例增益，X/Y 分轴串行运动并等待 IDLE；像素死区为 +/-3，
 连续3个独立样本进入死区后完成，X/Y 单次修正分别限幅12000/3000脉冲。包含500 ms视觉
 超时、60 s总时限、50次修正上限、底层软限位和轴故障停止。Shell命令为align_start、
-align_status、align_abort。当前只是待板测的P控制版本，尚未加入积分项。
+align_status、align_abort。该路径已实现，但 `frame_put` 完整任务仍待板测通过。
 
 工作：
 - 前视K230_2：像素误差映射到X/Z；
@@ -258,22 +259,28 @@ align_status、align_abort。当前只是待板测的P控制版本，尚未加�
 完成条件：静态目标不持续振荡；目标丢失时输出冻结并受控停止。
 
 
-P8 四任务状态机
+P7 四任务状态机
+
+所有任务通过预检后先进入 PRESET_POSE，按 Z、X、Y 顺序到达固定预设位置
+X=512000、Y=0、Z=77600。所有子流程最多尝试10次，重试间隔50 ms。
 
 模式1/3红色抓取：
-PRECHECK -> RED_OBSERVE -> FRONT_RED_READY -> ALIGN_XZ -> STABLE
+PRECHECK -> PRESET_POSE -> RED_OBSERVE -> FRONT_RED_READY -> ALIGN_XZ -> STABLE
 -> RECORD_XYZ -> BLIND_Y -> GRIP_CLOSE -> RETURN_RECORDED_POSE
--> VERIFY_RED_COUNT -> COMPLETE或有限次数RETRY。
+-> VERIFY -> COMPLETE。VERIFY 仅确认 GripClose APPLIED 后的逻辑持物状态；
+抓取后视觉计数因物块遮挡相机已作废。`red_pick` 和 `red_find` 的 BLIND_Y 均使用 TOF2。
 
 模式2 AprilTag放置：
-PRECHECK_HELD -> TAG_OBSERVE -> FRONT_TAG_READY -> ALIGN_XZ -> STABLE
--> BLIND_Y -> OPTIONAL_Z_DROP -> GRIP_OPEN -> SAFE_RETREAT -> COMPLETE。
+PRECHECK_HELD -> PRESET_POSE -> TAG_OBSERVE -> FRONT_TAG_READY -> ALIGN_XZ -> STABLE
+-> BLIND_Y -> OPTIONAL_Z_DROP -> GRIP_OPEN -> SAFE_RETREAT -> COMPLETE。BLIND_Y 使用 TOF1；
+开爪后 SAFE_RETREAT 按 Y、Z、X 顺序先收回Y轴。
 
 模式4红框放置：
-PRECHECK_HELD -> FRAME_OBSERVE -> DOWN_FRAME_READY -> ALIGN_XY -> STABLE
+PRECHECK_HELD -> PRESET_POSE -> FRAME_OBSERVE -> DOWN_FRAME_READY -> ALIGN_XY -> STABLE
 -> TOF3_Z_DESCEND -> GRIP_OPEN -> SAFE_RETREAT -> COMPLETE。
 
-每个状态必须定义进入动作、完成条件、超时、必需传感器和失败动作。
+2026-08-16 实机结果：`red_pick`、`red_find`、`tag_put` 已完整运行至 `COMPLETE`；
+`frame_put` 尚未通过。通过范围是正常完整任务链，不包含所有故障注入、掉电和耐久项目。
 
 
 P9 USART1任务和ACK
@@ -299,10 +306,10 @@ P10 整机联调
 不要一次测完所有参数。每完成下面一项就记录并冻结该项，再进入下一项。
 
 M1 只验证通信，不接机械负载运动
-- UART4 TX/RX交叉接线、共地、电平；
+- USART6 TX/RX交叉接线、共地、电平；
 - 发送固定17字节样例，确认Z轴MCU返回STATUS=00；
 - 人为改一个CRC字节，确认STATUS=02或丢弃策略符合协议；
-- 记录UART4单程和接受ACK延迟。
+- 记录USART6单程和接受ACK延迟。
 
 M2 三轴方向
 - 每轴只走很小距离；
@@ -392,17 +399,17 @@ M10 单任务和整机
 七、当前优先级和阻塞项
 ----------------------
 
-当前状态（2026-08-13）：P1已完成；P2第一版已完成首次板测，标定结果已支持EEPROM
-持久化。UART4 DMA收发和Z轴协议/位置层已完成软件实现，Z逻辑正方向映射为远离人工
-零点，范围0~576000脉冲，默认90000 Hz。K230_2 XZ红色标定（当前阶段P3）已完成
-状态机、2x2矩阵拟合、人工参考中心采集和独立EEPROM记录，均待连接实机验证。
+当前状态（2026-08-16）：USART6/F103 Z轴链路、P3 XZ标定、P4 XZ闭环和P7状态机均已
+进入实机联调。`red_pick`、`red_find`、`tag_put` 已完成正常完整任务链；`frame_put` 是唯一
+尚未完成的P7正常主线。X/Y驱动器堵转保护当前以 `FCT_SET_CLOG_PRO=0` 关闭，板测必须保留
+人工急停并依赖软件限位和超时。
 
 当前优先执行：
-1. 低速短距离确认Z轴正脉冲远离零点、负脉冲朝向零点，再验证人工z_zero和软限位；
-2. 在X/Z行程中部执行p3_start，核对五个采样姿态、矩阵符号和回到基准姿态；
-3. MANUAL_ALIGN时人工对正红色中心，执行p3_ref并验证EEPROM掉电读回；
-4. 重复P3标定并用正反向小步运动验证矩阵误差、重复性和跨位置一致性；
-5. P3实机稳定后实现K230_2 XZ视觉对正闭环，再进入四任务状态机。
+1. 依次单测 `frame_put` 的 FRAME_OBSERVE、ALIGN_XY、TOF3_Z_DESCEND、GRIP_OPEN 和 SAFE_RETREAT；
+2. 校验P2下视标定、K230_1模式和TOF3的 VALID/FRESH/READY，再运行完整 `frame_put`；
+3. 保存失败时的两行 `mission_status` 以及 `sf_status`、`align_status`、`C552` 和三轴状态；
+4. `frame_put` 正常链通过后，补做四任务重复运行、EEPROM掉电恢复、局部取消、全局abort和故障注入；
+5. 恢复X/Y堵转保护前重新评估阈值和误触发，保持关闭期间不得依赖驱动器堵转作为机械保护。
 
 最重要的原则：一次只解决一个可测问题。先确认通信，再确认方向，再确认比例，再确认行程和速度，
 最后才做PID和完整任务。参数数量看起来很多，但按M1~M10执行时，每一步只需要测少量数据。

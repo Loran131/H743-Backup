@@ -19,6 +19,8 @@
 #include "xy_vision_align.h"
 #include "motion_interfaces.h"
 #include "motion_coordinator.h"
+#include "mission_subflow.h"
+#include "mission_task.h"
 #include "z_axis_link.h"
 #include "z_axis.h"
 #include "xz_vision_calibration.h"
@@ -40,7 +42,19 @@ static const char *g_help_text =
     "  grip <open|close>  test both C552 gripper channels\r\n"
     "  c552_req <mask>    set required sensor mask (0..0x1F)\r\n"
     "  motion_status / xyz_snapshot  coordinator and valid XYZ snapshot\r\n"
-    "  abort / motion_resume         unified stop and explicit re-arm\r\n"
+    "  abort                         unified stop; restart clears latch\r\n"
+    "  sf_status / sf_abort           P6 subflow state and local cancel\r\n"
+    "  sf_observe <task> <red|tag|frame>\r\n"
+    "  sf_align <task> <xz|xy> <target_x> <target_y>\r\n"
+    "  sf_blind_y <task> <tof1|tof2> <stop_mm> <pulses_per_mm> <dir>\r\n"
+    "  sf_descend <task> <stop_mm> <max_pulses> <dir>\r\n"
+    "  sf_grip <task> <open|close> / sf_record / sf_return\r\n"
+    "  sf_safe_set <x> <y> <z> / sf_retreat <task>\r\n"
+    "  mission_start <task> / mission_status [task] / mission_abort\r\n"
+    "  mission_payload <empty|held>\r\n"
+    "  mission_align_set <task> <target_x> <target_y>\r\n"
+    "  mission_blind_set <task> <stop_mm> <pulses_per_mm> <dir>\r\n"
+    "  mission_z_set <tag_put|frame_put> <off|stop_mm max_pulses dir>\r\n"
     "--------------------------------------------------\r\n"
     " X/Y CONTROL (signed pulses, + = away from zero):\r\n"
     "  x_move <delta> [rpm] [acc]   safeguarded relative move\r\n"
@@ -49,7 +63,6 @@ static const char *g_help_text =
     "  xy_status                     show coordinates and state\r\n"
     "  x_home / y_home               MANUAL sensorless homing\r\n"
     "  x_zero / y_zero               MANUAL current-position zero\r\n"
-    "  x_clear / y_clear             clear control-layer fault\r\n"
     "  p2_start [k230] [xstep] [ystep]  start XY vision calibration\r\n"
     "  p2_status / p2_ref / p2_abort    inspect, capture reference, abort\r\n"
     "  p2_save / p2_load / p2_reset     manage EEPROM calibration\r\n"
@@ -63,8 +76,10 @@ static const char *g_help_text =
     " Z CONTROL (signed pulses, + = away from zero):\r\n"
     "  z_zero                            set current position to zero\r\n"
     "  z_move <delta_pulses> [speed_hz]  relative move / unreferenced jog\r\n"
-    "  z_stop                            emergency stop\r\n"
-    "  z_status                          show state and auto-recovery counters\r\n"
+    "  z_stop                            owner-gated local stop\r\n"
+    "  z_clear                           clear and verify Z controller fault\r\n"
+    "  z_tx_test                         blocking USART6 QUERY_STATUS frame\r\n"
+    "  z_status                          show state and confirmed recovery\r\n"
     "--------------------------------------------------\r\n"
     " LOW-LEVEL MOTOR:\r\n"
     "  pos_rel  [addr] <dir> <acc> <speed> <pulses>\r\n"
@@ -74,7 +89,6 @@ static const char *g_help_text =
     "  motor_stop [addr]\r\n"
     "  enable   [addr] <0|1>\r\n"
     "  motor_zero [addr]\r\n"
-    "  clear    [addr]\r\n"
     "------------------------------------------------\r\n"
     " QUERY:\r\n"
     "  sta      [addr]     -- motor status\r\n"
@@ -123,7 +137,6 @@ static void cmd_torque(int argc, char *argv[]);
 static void cmd_stop(int argc, char *argv[]);
 static void cmd_enable(int argc, char *argv[]);
 static void cmd_zero(int argc, char *argv[]);
-static void cmd_clear(int argc, char *argv[]);
 static void cmd_read_sta(int argc, char *argv[]);
 static void cmd_read_pos(int argc, char *argv[]);
 static void cmd_read_speed(int argc, char *argv[]);
@@ -161,8 +174,6 @@ static void cmd_x_home(int argc, char *argv[]);
 static void cmd_y_home(int argc, char *argv[]);
 static void cmd_x_zero(int argc, char *argv[]);
 static void cmd_y_zero(int argc, char *argv[]);
-static void cmd_x_clear(int argc, char *argv[]);
-static void cmd_y_clear(int argc, char *argv[]);
 static void cmd_p2_start(int argc, char *argv[]);
 static void cmd_p2_status(int argc, char *argv[]);
 static void cmd_p2_ref(int argc, char *argv[]);
@@ -187,11 +198,30 @@ static void cmd_p4_abort(int argc, char *argv[]);
 static void cmd_z_move(int argc, char *argv[]);
 static void cmd_z_zero(int argc, char *argv[]);
 static void cmd_z_stop(int argc, char *argv[]);
+static void cmd_z_clear(int argc, char *argv[]);
+static void cmd_z_tx_test(int argc, char *argv[]);
 static void cmd_z_status(int argc, char *argv[]);
 static void cmd_motion_status(int argc, char *argv[]);
 static void cmd_abort(int argc, char *argv[]);
-static void cmd_motion_resume(int argc, char *argv[]);
 static void cmd_xyz_snapshot(int argc, char *argv[]);
+static void cmd_sf_status(int argc, char *argv[]);
+static void cmd_sf_abort(int argc, char *argv[]);
+static void cmd_sf_observe(int argc, char *argv[]);
+static void cmd_sf_align(int argc, char *argv[]);
+static void cmd_sf_blind_y(int argc, char *argv[]);
+static void cmd_sf_descend(int argc, char *argv[]);
+static void cmd_sf_grip(int argc, char *argv[]);
+static void cmd_sf_record(int argc, char *argv[]);
+static void cmd_sf_return(int argc, char *argv[]);
+static void cmd_sf_safe_set(int argc, char *argv[]);
+static void cmd_sf_retreat(int argc, char *argv[]);
+static void cmd_mission_start(int argc, char *argv[]);
+static void cmd_mission_status(int argc, char *argv[]);
+static void cmd_mission_abort(int argc, char *argv[]);
+static void cmd_mission_payload(int argc, char *argv[]);
+static void cmd_mission_align_set(int argc, char *argv[]);
+static void cmd_mission_blind_set(int argc, char *argv[]);
+static void cmd_mission_z_set(int argc, char *argv[]);
 
 static const ShellCmd_t g_cmd_table[] = {
     {"cans",      "",           1, cmd_can_status},
@@ -209,8 +239,6 @@ static const ShellCmd_t g_cmd_table[] = {
     {"y_home",     "",           1, cmd_y_home},
     {"x_zero",     "",           1, cmd_x_zero},
     {"y_zero",     "",           1, cmd_y_zero},
-    {"x_clear",    "",           1, cmd_x_clear},
-    {"y_clear",    "",           1, cmd_y_clear},
     {"p2_start",   "[k230=1|2] [xstep=51200] [ystep=12800]", 1, cmd_p2_start},
     {"p2_status",  "",           1, cmd_p2_status},
     {"p2_ref",     "",           1, cmd_p2_ref},
@@ -235,11 +263,33 @@ static const ShellCmd_t g_cmd_table[] = {
     {"z_zero",     "",          1, cmd_z_zero},
     {"z_move",     "<delta_pulses> [speed_hz=90000]", 2, cmd_z_move},
     {"z_stop",     "",          1, cmd_z_stop},
+    {"z_clear",    "",          1, cmd_z_clear},
+    {"z_tx_test",  "",          1, cmd_z_tx_test},
     {"z_status",   "",          1, cmd_z_status},
     {"motion_status", "",       1, cmd_motion_status},
     {"abort",        "",        1, cmd_abort},
-    {"motion_resume", "",       1, cmd_motion_resume},
     {"xyz_snapshot", "",        1, cmd_xyz_snapshot},
+    {"sf_status",    "",        1, cmd_sf_status},
+    {"sf_abort",     "",        1, cmd_sf_abort},
+    {"sf_observe", "<task> <red|tag|frame>", 3, cmd_sf_observe},
+    {"sf_align", "<task> <xz|xy> <target_x> <target_y>", 5, cmd_sf_align},
+    {"sf_blind_y", "<task> <tof1|tof2> <stop_mm> <pulses_per_mm> <dir>", 6, cmd_sf_blind_y},
+    {"sf_descend", "<task> <stop_mm> <max_pulses> <dir>", 5, cmd_sf_descend},
+    {"sf_grip", "<task> <open|close>", 3, cmd_sf_grip},
+    {"sf_record", "<task>", 2, cmd_sf_record},
+    {"sf_return", "<task>", 2, cmd_sf_return},
+    {"sf_safe_set", "<x> <y> <z>", 4, cmd_sf_safe_set},
+    {"sf_retreat", "<task>", 2, cmd_sf_retreat},
+    {"mission_start", "<task>", 2, cmd_mission_start},
+    {"mission_status", "[task]", 1, cmd_mission_status},
+    {"mission_abort", "", 1, cmd_mission_abort},
+    {"mission_payload", "<empty|held>", 2, cmd_mission_payload},
+    {"mission_align_set", "<task> <target_x> <target_y>", 4,
+     cmd_mission_align_set},
+    {"mission_blind_set", "<task> <stop_mm> <pulses_per_mm> <dir>", 5,
+     cmd_mission_blind_set},
+    {"mission_z_set", "<tag_put|frame_put> <off|stop_mm max_pulses dir>",
+     3, cmd_mission_z_set},
     /* Motion */
     {"pos_rel",   "<addr> <dir> <acc> <speed> <pulses>", 6, cmd_pos_rel},
     {"pos_abs",   "<addr> <dir> <acc> <speed> <pulses>", 6, cmd_pos_abs},
@@ -248,7 +298,6 @@ static const ShellCmd_t g_cmd_table[] = {
     {"motor_stop", "[addr]",                             1, cmd_stop},
     {"enable",    "<addr> <0|1>",                        3, cmd_enable},
     {"motor_zero", "[addr]",                             1, cmd_zero},
-    {"clear",     "[addr]",                              1, cmd_clear},
     /* Query */
     {"sta",       "[addr]", 1, cmd_read_sta},
     {"motor_pos", "[addr]", 1, cmd_read_pos},
@@ -587,7 +636,7 @@ static void cmd_grip(int argc, char *argv[])
     }
     if (shell_acquire_manual(0U) == 0U) return;
     if (MotionCoordinator_IsGripperFrozen() != 0U) {
-        printf("[C552] gripper frozen until motion_resume\r\n");
+        printf("[C552] gripper frozen by safety latch; restart required\r\n");
         return;
     }
     result = C552_SetGripper(C552_GRIPPER_BOTH, state, HAL_GetTick());
@@ -653,8 +702,10 @@ static void cmd_xy_stop(int argc, char *argv[])
 {
     (void)argc;
     (void)argv;
-    MotionCoordinator_RequestAbort();
-    printf("[MOTION] unified X/Y/Z stop published\r\n");
+    if (shell_acquire_manual(0U) == 0U) return;
+    XY_Stop(XY_AXIS_X);
+    XY_Stop(XY_AXIS_Y);
+    printf("[XY] local stop requested (non-latching)\r\n");
 }
 
 static void cmd_xy_status(int argc, char *argv[])
@@ -680,7 +731,8 @@ static void cmd_xy_status(int argc, char *argv[])
         const XY_AxisConfig *config = XY_GetConfig((XY_Axis)i);
         (void)XY_GetStatus((XY_Axis)i, &status);
         uint32_t completion_ms = (status.completion_tick != 0U) ?
-                                 status.completion_tick - status.command_tick : 0U;
+                                 status.completion_tick - status.command_tick :
+                                 0U;
         printf("[%c] addr=%u state=%s fault=%u(%s) ref=%u pos=%ld target=%ld "
                "rpm=%d arrived=%u replied=%u limits=%ld..%ld age=%lu "
                "last_cmd=0x%02X completion=%s/%lu ms releases=A%lu/S%lu/T%lu "
@@ -775,26 +827,6 @@ static void cmd_y_zero(int argc, char *argv[])
     }
     cmd_xy_manual_result(XY_AXIS_Y, "MANUAL set zero",
                          XY_SetCurrentPositionAsZero(XY_AXIS_Y));
-}
-
-static void cmd_x_clear(int argc, char *argv[])
-{
-    (void)argc; (void)argv;
-    if (MotionCoordinator_GetOwner() != MOTION_OWNER_NONE) {
-        printf("[X] clear rejected: motion owner active\r\n");
-        return;
-    }
-    cmd_xy_manual_result(XY_AXIS_X, "clear fault", XY_ClearFault(XY_AXIS_X));
-}
-
-static void cmd_y_clear(int argc, char *argv[])
-{
-    (void)argc; (void)argv;
-    if (MotionCoordinator_GetOwner() != MOTION_OWNER_NONE) {
-        printf("[Y] clear rejected: motion owner active\r\n");
-        return;
-    }
-    cmd_xy_manual_result(XY_AXIS_Y, "clear fault", XY_ClearFault(XY_AXIS_Y));
 }
 
 static void shell_print_float(float value, uint8_t precision)
@@ -913,8 +945,8 @@ static void cmd_p2_ref(int argc, char *argv[])
 static void cmd_p2_abort(int argc, char *argv[])
 {
     (void)argc; (void)argv;
-    MotionCoordinator_RequestAbort();
-    printf("[MOTION] P2 ABORT published\r\n");
+    MotionCoordinator_RequestCancel(MOTION_OWNER_P2_CALIBRATION);
+    printf("[P2] cancel published (non-latching)\r\n");
 }
 
 static void cmd_p2_save(int argc, char *argv[])
@@ -1008,8 +1040,8 @@ static void cmd_align_status(int argc, char *argv[])
 static void cmd_align_abort(int argc, char *argv[])
 {
     (void)argc; (void)argv;
-    MotionCoordinator_RequestAbort();
-    printf("[MOTION] XY ALIGN ABORT published\r\n");
+    MotionCoordinator_RequestCancel(MOTION_OWNER_XY_ALIGN);
+    printf("[ALIGN] cancel published (non-latching)\r\n");
 }
 
 static void cmd_p3_start(int argc, char *argv[])
@@ -1106,8 +1138,8 @@ static void cmd_p3_ref(int argc, char *argv[])
 static void cmd_p3_abort(int argc, char *argv[])
 {
     (void)argc; (void)argv;
-    MotionCoordinator_RequestAbort();
-    printf("[MOTION] P3 ABORT published\r\n");
+    MotionCoordinator_RequestCancel(MOTION_OWNER_P3_CALIBRATION);
+    printf("[P3] cancel published (non-latching)\r\n");
 }
 
 static void cmd_p3_save(int argc, char *argv[])
@@ -1194,8 +1226,8 @@ static void cmd_p4_status(int argc, char *argv[])
 static void cmd_p4_abort(int argc, char *argv[])
 {
     (void)argc; (void)argv;
-    MotionCoordinator_RequestAbort();
-    printf("[MOTION] P4 ABORT published\r\n");
+    MotionCoordinator_RequestCancel(MOTION_OWNER_P4_XZ_ALIGN);
+    printf("[P4] cancel published (non-latching)\r\n");
 }
 
 static void cmd_z_move(int argc, char *argv[])
@@ -1248,8 +1280,44 @@ static void cmd_z_stop(int argc, char *argv[])
 {
     (void)argc;
     (void)argv;
-    MotionCoordinator_RequestAbort();
-    printf("[MOTION] unified X/Y/Z stop published\r\n");
+    if (shell_acquire_manual(0U) == 0U) return;
+    printf("[Z] local stop: %s\r\n",
+           ZAxis_ResultString(ZAxisControl_Stop()));
+}
+
+static void cmd_z_clear(int argc, char *argv[])
+{
+    ZAxisControlResult result;
+    (void)argc;
+    (void)argv;
+    if (MotionCoordinator_GetOwner() != MOTION_OWNER_NONE) {
+        printf("[Z] clear rejected: motion owner active\r\n");
+        return;
+    }
+    result = ZAxisControl_ClearFault();
+    printf("[Z] clear/verify: %s%s\r\n",
+           ZAxis_ResultString(result),
+           (result == Z_RESULT_OK) ? " (use z_status to await result)" : "");
+}
+
+static void cmd_z_tx_test(int argc, char *argv[])
+{
+    static const uint8_t query_status_frame[Z_AXIS_FRAME_SIZE] = {
+        0xAAU, 0x55U, 0x0AU, 0x04U, 0x00U, 0x00U, 0x00U, 0x00U,
+        0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x66U, 0xE9U, 0x0DU,
+        0x0AU
+    };
+    HAL_StatusTypeDef status;
+
+    (void)argc;
+    (void)argv;
+    status = USART6_TransmitBlocking(query_status_frame,
+                                     sizeof(query_status_frame), 100U);
+    printf("[Z] USART6 blocking TX QUERY_STATUS: %s (%u bytes)\r\n",
+           (status == HAL_OK) ? "OK" :
+           (status == HAL_BUSY) ? "BUSY" :
+           (status == HAL_TIMEOUT) ? "TIMEOUT" : "ERROR",
+           (unsigned int)sizeof(query_status_frame));
 }
 
 static void cmd_z_status(int argc, char *argv[])
@@ -1267,13 +1335,17 @@ static void cmd_z_status(int argc, char *argv[])
            (long)control.position_pulses, (long)control.target_pulses,
            (long)Z_AXIS_SOFT_MIN_PULSES, (long)Z_AXIS_SOFT_MAX_PULSES,
            (unsigned long)Z_AXIS_DEFAULT_SPEED_HZ);
-    printf("[Z] recovery=automatic faults=%lu recovered=%lu "
-           "last=%s last_age=%lu ms\r\n",
+    printf("[Z] recovery=confirmed faults=%lu recovered=%lu "
+           "last=%s last_age=%lu ms result_seq=%lu result=0x%02X "
+           "controller_fault=0x%08lX\r\n",
            (unsigned long)control.fault_count,
            (unsigned long)control.auto_recovery_count,
            ZAxis_FaultString(control.last_fault),
            (unsigned long)((control.fault_count != 0U) ?
-                           (HAL_GetTick() - control.last_fault_tick) : 0U));
+                           (HAL_GetTick() - control.last_fault_tick) : 0U),
+           (unsigned long)status.recovery_result_seq,
+           (unsigned int)status.recovery_result_status,
+           (unsigned long)status.controller_fault_status);
     printf("[Z] state=%s rx=%s response=0x%02X status=0x%02X speed=%lu "
            "steps=%lu age=%lu ms\r\n",
            ZAxisLink_StateString(status.state),
@@ -1291,6 +1363,13 @@ static void cmd_z_status(int argc, char *argv[])
            (unsigned long)status.unexpected_frames,
            (unsigned long)status.uart_errors,
            (unsigned long)status.timeouts);
+    printf("[Z] uart_last=0x%08lX ore=%lu fe=%lu ne=%lu pe=%lu dma=%lu\r\n",
+           (unsigned long)status.last_uart_error_code,
+           (unsigned long)status.uart_ore_errors,
+           (unsigned long)status.uart_fe_errors,
+           (unsigned long)status.uart_ne_errors,
+           (unsigned long)status.uart_pe_errors,
+           (unsigned long)status.uart_dma_errors);
 }
 
 static void cmd_motion_status(int argc, char *argv[])
@@ -1326,15 +1405,6 @@ static void cmd_abort(int argc, char *argv[])
     printf("[MOTION] ABORT published\r\n");
 }
 
-static void cmd_motion_resume(int argc, char *argv[])
-{
-    (void)argc;
-    (void)argv;
-    printf("[MOTION] resume: %s\r\n",
-           MotionCoordinator_Resume(HAL_GetTick()) ? "OK" :
-           "REJECTED (stop active, axis fault, or axis moving)");
-}
-
 static void cmd_xyz_snapshot(int argc, char *argv[])
 {
     MotionPositionSnapshot snapshot;
@@ -1350,6 +1420,404 @@ static void cmd_xyz_snapshot(int argc, char *argv[])
            (long)snapshot.x_pulses, (long)snapshot.y_pulses,
            (long)snapshot.z_pulses,
            (unsigned long)snapshot.capture_tick);
+}
+
+static uint8_t shell_parse_task(const char *name, MissionTaskName *task)
+{
+    if (strcmp(name, "red_pick") == 0) *task = MISSION_TASK_RED_PICK;
+    else if (strcmp(name, "tag_put") == 0) *task = MISSION_TASK_TAG_PUT;
+    else if (strcmp(name, "red_find") == 0) *task = MISSION_TASK_RED_FIND;
+    else if (strcmp(name, "frame_put") == 0) *task = MISSION_TASK_FRAME_PUT;
+    else return 0U;
+    return 1U;
+}
+
+static uint8_t shell_allow_standalone_subflow(void)
+{
+    if (MissionTask_IsActive() != 0U) {
+        printf("[P6] rejected: P7 mission active; use mission_status or "
+               "mission_abort\r\n");
+        return 0U;
+    }
+    return 1U;
+}
+
+static void cmd_sf_status(int argc, char *argv[])
+{
+    MissionSubflowStatus status;
+    (void)argc; (void)argv;
+    MissionSubflow_GetStatus(&status);
+    printf("[P6] task=%s subflow=%s state=%s attempt=%u/%u z_recovery=%u/%u "
+           "failure=%s:%s detail=%ld age=%lu ms\r\n",
+           MissionSubflow_TaskString(status.task),
+           MissionSubflow_TypeString(status.type),
+           MissionSubflow_StateString(status.state),
+           (unsigned int)status.attempt,
+           (unsigned int)status.max_attempts,
+           (unsigned int)status.axis_recoveries,
+           (unsigned int)status.max_axis_recoveries,
+           MissionSubflow_SourceString(status.failure.source),
+           MissionSubflow_ReasonString(status.failure.reason),
+           (long)status.failure.detail,
+           (unsigned long)(HAL_GetTick() - status.state_tick));
+    printf("[P6] sample=%u stable=%u distance=%u target=(%d,%d) "
+           "step=%ld pose=(%ld,%ld,%ld)\r\n",
+           (unsigned int)status.last_sample_seq,
+           (unsigned int)status.stable_samples,
+           (unsigned int)status.distance_mm,
+           (int)status.target_pixel[0], (int)status.target_pixel[1],
+           (long)status.requested_pulses,
+           (long)status.pose.x_pulses, (long)status.pose.y_pulses,
+           (long)status.pose.z_pulses);
+}
+
+static void cmd_sf_abort(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    if (shell_allow_standalone_subflow() == 0U) return;
+    MissionSubflow_Cancel(HAL_GetTick());
+    printf("[P6] current subflow cancelled (non-latching)\r\n");
+}
+
+static void cmd_sf_observe(int argc, char *argv[])
+{
+    MissionTaskName task;
+    uint8_t started = 0U;
+    (void)argc;
+    if (shell_allow_standalone_subflow() == 0U) return;
+    if (shell_parse_task(argv[1], &task) == 0U) goto usage;
+    if (strcmp(argv[2], "red") == 0)
+        started = MissionSubflow_StartObserveRedFront(task, HAL_GetTick());
+    else if (strcmp(argv[2], "tag") == 0)
+        started = MissionSubflow_StartObserveTagFront(task, HAL_GetTick());
+    else if (strcmp(argv[2], "frame") == 0)
+        started = MissionSubflow_StartObserveFrameDown(task, HAL_GetTick());
+    else goto usage;
+    printf("[P6] observe start: %s\r\n", started ? "OK" : "REJECTED");
+    return;
+usage:
+    printf("Usage: sf_observe <red_pick|tag_put|red_find|frame_put> "
+           "<red|tag|frame>\r\n");
+}
+
+static void cmd_sf_align(int argc, char *argv[])
+{
+    MissionTaskName task;
+    long x = strtol(argv[3], NULL, 0);
+    long y = strtol(argv[4], NULL, 0);
+    uint8_t started;
+    (void)argc;
+    if (shell_allow_standalone_subflow() == 0U) return;
+    if ((shell_parse_task(argv[1], &task) == 0U) ||
+        (x < INT16_MIN) || (x > INT16_MAX) ||
+        (y < INT16_MIN) || (y > INT16_MAX)) goto usage;
+    if (strcmp(argv[2], "xz") == 0)
+        started = MissionSubflow_StartAlignXZ(task, (int16_t)x,
+                                              (int16_t)y, HAL_GetTick());
+    else if (strcmp(argv[2], "xy") == 0)
+        started = MissionSubflow_StartAlignXY(task, (int16_t)x,
+                                              (int16_t)y, HAL_GetTick());
+    else goto usage;
+    printf("[P6] align start: %s\r\n", started ? "OK" : "REJECTED");
+    return;
+usage:
+    printf("Usage: sf_align <task> <xz|xy> <target_x> <target_y>\r\n");
+}
+
+static void cmd_sf_blind_y(int argc, char *argv[])
+{
+    MissionTaskName task;
+    uint8_t tof_id;
+    unsigned long stop_mm = strtoul(argv[3], NULL, 0);
+    unsigned long ppm = strtoul(argv[4], NULL, 0);
+    long direction = strtol(argv[5], NULL, 0);
+    uint8_t started;
+    (void)argc;
+    if (shell_allow_standalone_subflow() == 0U) return;
+    if (shell_parse_task(argv[1], &task) == 0U) goto usage;
+    if (strcmp(argv[2], "tof1") == 0) tof_id = C552_ID_TOF1;
+    else if (strcmp(argv[2], "tof2") == 0) tof_id = C552_ID_TOF2;
+    else goto usage;
+    if ((stop_mm > UINT16_MAX) || (ppm == 0U) || (ppm > UINT32_MAX) ||
+        ((direction != -1) && (direction != 1))) goto usage;
+    started = MissionSubflow_StartBlindMoveY(task, tof_id,
+        (uint16_t)stop_mm, (uint32_t)ppm, (int8_t)direction, HAL_GetTick());
+    printf("[P6] BlindMoveY start: %s\r\n",
+           started ? "OK" : "REJECTED");
+    return;
+usage:
+    printf("Usage: sf_blind_y <task> <tof1|tof2> <stop_mm> "
+           "<pulses_per_mm> <-1|1>\r\n");
+}
+
+static void cmd_sf_descend(int argc, char *argv[])
+{
+    MissionTaskName task;
+    unsigned long stop_mm = strtoul(argv[2], NULL, 0);
+    unsigned long max_pulses = strtoul(argv[3], NULL, 0);
+    long direction = strtol(argv[4], NULL, 0);
+    uint8_t started;
+    (void)argc;
+    if (shell_allow_standalone_subflow() == 0U) return;
+    if ((shell_parse_task(argv[1], &task) == 0U) ||
+        (stop_mm > UINT16_MAX) || (max_pulses == 0U) ||
+        (max_pulses > INT32_MAX) ||
+        ((direction != -1) && (direction != 1))) goto usage;
+    started = MissionSubflow_StartTof3Descend(task, (uint16_t)stop_mm,
+        (uint32_t)max_pulses, (int8_t)direction, HAL_GetTick());
+    printf("[P6] Tof3Descend start: %s\r\n",
+           started ? "OK" : "REJECTED");
+    return;
+usage:
+    printf("Usage: sf_descend <task> <stop_mm> <max_pulses> <-1|1>\r\n");
+}
+
+static void cmd_sf_grip(int argc, char *argv[])
+{
+    MissionTaskName task;
+    uint8_t close;
+    (void)argc;
+    if (shell_allow_standalone_subflow() == 0U) return;
+    if (shell_parse_task(argv[1], &task) == 0U) goto usage;
+    if (strcmp(argv[2], "open") == 0) close = 0U;
+    else if (strcmp(argv[2], "close") == 0) close = 1U;
+    else goto usage;
+    printf("[P6] Grip%s start: %s\r\n", close ? "Close" : "Open",
+           MissionSubflow_StartGrip(task, close, HAL_GetTick()) ?
+           "OK" : "REJECTED");
+    return;
+usage:
+    printf("Usage: sf_grip <task> <open|close>\r\n");
+}
+
+static void cmd_sf_record(int argc, char *argv[])
+{
+    MissionTaskName task;
+    (void)argc;
+    if (shell_allow_standalone_subflow() == 0U) return;
+    if (shell_parse_task(argv[1], &task) == 0U) {
+        printf("Usage: sf_record <task>\r\n");
+        return;
+    }
+    printf("[P6] RecordPose start: %s\r\n",
+           MissionSubflow_StartRecordPose(task, HAL_GetTick()) ?
+           "OK" : "REJECTED");
+}
+
+static void cmd_sf_return(int argc, char *argv[])
+{
+    MissionTaskName task;
+    (void)argc;
+    if (shell_allow_standalone_subflow() == 0U) return;
+    if (shell_parse_task(argv[1], &task) == 0U) {
+        printf("Usage: sf_return <task>\r\n");
+        return;
+    }
+    printf("[P6] ReturnPose start: %s\r\n",
+           MissionSubflow_StartReturnPose(task, HAL_GetTick()) ?
+           "OK" : "REJECTED (record a valid pose first)");
+}
+
+static void cmd_sf_safe_set(int argc, char *argv[])
+{
+    MotionPositionSnapshot pose;
+    uint8_t set;
+    (void)argc;
+    if (shell_allow_standalone_subflow() == 0U) return;
+    pose.x_pulses = (int32_t)strtol(argv[1], NULL, 0);
+    pose.y_pulses = (int32_t)strtol(argv[2], NULL, 0);
+    pose.z_pulses = (int32_t)strtol(argv[3], NULL, 0);
+    pose.capture_tick = HAL_GetTick();
+    set = MissionSubflow_SetSafePose(&pose);
+    if (set == 0U) {
+        printf("[P6] safe pose set: REJECTED (limits)\r\n");
+    } else if (MissionTask_SaveConfiguration() == 0U) {
+        printf("[P6] safe pose set: RAM_ONLY (EEPROM write failed)\r\n");
+    } else {
+        printf("[P6] safe pose set: OK (persisted)\r\n");
+    }
+}
+
+static void cmd_sf_retreat(int argc, char *argv[])
+{
+    MissionTaskName task;
+    (void)argc;
+    if (shell_allow_standalone_subflow() == 0U) return;
+    if (shell_parse_task(argv[1], &task) == 0U) {
+        printf("Usage: sf_retreat <task>\r\n");
+        return;
+    }
+    printf("[P6] SafeRetreat start: %s\r\n",
+           MissionSubflow_StartSafeRetreat(task, HAL_GetTick()) ?
+           "OK" : "REJECTED (safe pose or current XYZ invalid)");
+}
+
+static void cmd_mission_start(int argc, char *argv[])
+{
+    MissionTaskName task;
+    (void)argc;
+    if (shell_parse_task(argv[1], &task) == 0U) {
+        printf("Usage: mission_start <red_pick|tag_put|red_find|frame_put>\r\n");
+        return;
+    }
+    printf("[P7] %s start request: %s\r\n",
+           MissionSubflow_TaskString(task),
+           MissionTask_RequestStart(task) ? "QUEUED" : "REJECTED");
+}
+
+static void cmd_mission_status(int argc, char *argv[])
+{
+    MissionTaskStatus status;
+    MissionTaskConfig config;
+    MissionTaskName config_task;
+    MissionTask_GetStatus(&status);
+    config_task = status.task;
+    if ((argc > 1) &&
+        (shell_parse_task(argv[1], &config_task) == 0U)) {
+        printf("Usage: mission_status [red_pick|tag_put|red_find|frame_put]\r\n");
+        return;
+    }
+    MissionTask_GetConfig(config_task, &config);
+    printf("[P7] task=%s state=%s payload=%s failure=%s:%s detail=%ld "
+           "age=%lu ms total=%lu ms pending=%u/%u done=%lu failed=%lu\r\n",
+           MissionSubflow_TaskString(status.task),
+           MissionTask_StateString(status.state),
+           MissionTask_PayloadString(status.payload),
+           MissionSubflow_SourceString(status.failure.source),
+           MissionSubflow_ReasonString(status.failure.reason),
+           (long)status.failure.detail,
+           (unsigned long)(HAL_GetTick() - status.state_tick),
+           (unsigned long)(HAL_GetTick() - status.start_tick),
+           (unsigned int)status.start_pending,
+           (unsigned int)status.cancel_pending,
+           (unsigned long)status.completed_count,
+           (unsigned long)status.failed_count);
+    printf("[P7] subflow=%s/%s attempt=%u/%u z_recovery=%u/%u "
+           "measured=%u mm step=%ld "
+           "config=%s align=%u target=(%d,%d) "
+           "blind=%u stop=%u ppm=%lu dir=%d\r\n",
+           MissionSubflow_TypeString(status.subflow_type),
+           MissionSubflow_StateString(status.subflow_state),
+           (unsigned int)status.subflow_attempt,
+           (unsigned int)status.subflow_max_attempts,
+           (unsigned int)status.axis_recoveries,
+           (unsigned int)status.max_axis_recoveries,
+           (unsigned int)status.subflow_distance_mm,
+           (long)status.subflow_requested_pulses,
+           MissionSubflow_TaskString(config_task),
+           (unsigned int)config.align_configured,
+           (int)config.target_x, (int)config.target_y,
+           (unsigned int)config.blind_configured,
+           (unsigned int)config.blind_stop_mm,
+           (unsigned long)config.blind_pulses_per_mm,
+           (int)config.blind_direction);
+    printf("[P7] z enabled=%u configured=%u stop=%u max=%lu dir=%d "
+           "safe_pose=%u storage=%s generation=%lu\r\n",
+           (unsigned int)config.z_enabled,
+           (unsigned int)config.z_configured,
+           (unsigned int)config.z_stop_mm,
+           (unsigned long)config.z_max_pulses,
+           (int)config.z_direction,
+           (unsigned int)MissionSubflow_HasSafePose(),
+           MissionTask_StorageString(status.storage_state),
+           (unsigned long)status.storage_generation);
+}
+
+static void cmd_mission_abort(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    MissionTask_RequestCancel();
+    printf("[P7] mission cancel requested (non-latching)\r\n");
+}
+
+static void cmd_mission_payload(int argc, char *argv[])
+{
+    MissionPayloadState payload;
+    (void)argc;
+    if (strcmp(argv[1], "empty") == 0)
+        payload = MISSION_PAYLOAD_EMPTY;
+    else if (strcmp(argv[1], "held") == 0)
+        payload = MISSION_PAYLOAD_HELD;
+    else {
+        printf("Usage: mission_payload <empty|held>\r\n");
+        return;
+    }
+    printf("[P7] payload=%s: %s\r\n",
+           MissionTask_PayloadString(payload),
+           MissionTask_SetPayload(payload) ? "OK" : "REJECTED (active)");
+}
+
+static void cmd_mission_align_set(int argc, char *argv[])
+{
+    MissionTaskName task;
+    long x = strtol(argv[2], NULL, 0);
+    long y = strtol(argv[3], NULL, 0);
+    (void)argc;
+    if ((shell_parse_task(argv[1], &task) == 0U) ||
+        (x < INT16_MIN) || (x > INT16_MAX) ||
+        (y < INT16_MIN) || (y > INT16_MAX)) {
+        printf("Usage: mission_align_set <task> <target_x> <target_y>\r\n");
+        return;
+    }
+    printf("[P7] %s align target: %s\r\n",
+           MissionSubflow_TaskString(task),
+           MissionTask_SetAlignTarget(task, (int16_t)x, (int16_t)y) ?
+           "OK (persisted)" : "REJECTED (active/EEPROM)");
+}
+
+static void cmd_mission_blind_set(int argc, char *argv[])
+{
+    MissionTaskName task;
+    unsigned long stop_mm = strtoul(argv[2], NULL, 0);
+    unsigned long ppm = strtoul(argv[3], NULL, 0);
+    long direction = strtol(argv[4], NULL, 0);
+    (void)argc;
+    if ((shell_parse_task(argv[1], &task) == 0U) ||
+        (stop_mm > UINT16_MAX) || (ppm == 0U) || (ppm > UINT32_MAX) ||
+        ((direction != -1) && (direction != 1))) {
+        printf("Usage: mission_blind_set <task> <stop_mm> "
+               "<pulses_per_mm> <-1|1>\r\n");
+        return;
+    }
+    printf("[P7] %s BlindMoveY config: %s\r\n",
+           MissionSubflow_TaskString(task),
+           MissionTask_SetBlindY(task, (uint16_t)stop_mm, (uint32_t)ppm,
+                                 (int8_t)direction) ?
+           "OK (persisted)" : "REJECTED (task/type/active/EEPROM)");
+}
+
+static void cmd_mission_z_set(int argc, char *argv[])
+{
+    MissionTaskName task;
+    unsigned long stop_mm;
+    unsigned long max_pulses;
+    long direction;
+    if ((shell_parse_task(argv[1], &task) == 0U) ||
+        ((task != MISSION_TASK_TAG_PUT) &&
+         (task != MISSION_TASK_FRAME_PUT))) goto usage;
+    if ((argc == 3) && (strcmp(argv[2], "off") == 0)) {
+        printf("[P7] tag_put optional Z: %s\r\n",
+               MissionTask_SetZDrop(task, 0U, 0U, 0U, 0) ?
+               "OFF (persisted)" : "REJECTED (active/EEPROM)");
+        return;
+    }
+    if (argc != 5) goto usage;
+    stop_mm = strtoul(argv[2], NULL, 0);
+    max_pulses = strtoul(argv[3], NULL, 0);
+    direction = strtol(argv[4], NULL, 0);
+    if ((stop_mm > UINT16_MAX) || (max_pulses == 0U) ||
+        (max_pulses > INT32_MAX) ||
+        ((direction != -1) && (direction != 1))) goto usage;
+    printf("[P7] %s Z drop config: %s\r\n",
+           MissionSubflow_TaskString(task),
+           MissionTask_SetZDrop(task, 1U, (uint16_t)stop_mm,
+                                (uint32_t)max_pulses,
+                                (int8_t)direction) ?
+           "OK (persisted)" : "REJECTED (active/EEPROM)");
+    return;
+usage:
+    printf("Usage: mission_z_set <tag_put|frame_put> "
+           "<off|stop_mm max_pulses <-1|1>>\r\n");
 }
 
 static void cmd_pos_rel(int argc, char *argv[])
@@ -1429,10 +1897,18 @@ static void cmd_torque(int argc, char *argv[])
 
 static void cmd_stop(int argc, char *argv[])
 {
-    (void)argc;
-    (void)argv;
-    MotionCoordinator_RequestAbort();
-    printf("[MOTION] unified X/Y/Z stop published\r\n");
+    uint8_t addr = get_addr(argc, argv, 1);
+    if (shell_acquire_manual(0U) == 0U) return;
+    if (addr == XY_X_MOTOR_ADDRESS) {
+        XY_Stop(XY_AXIS_X);
+    } else if (addr == XY_Y_MOTOR_ADDRESS) {
+        XY_Stop(XY_AXIS_Y);
+    } else {
+        printf("[XY] motor_stop rejected: managed addresses are 1 and 2\r\n");
+        return;
+    }
+    printf("[XY] local motor stop addr=%u requested\r\n",
+           (unsigned int)addr);
 }
 
 static void cmd_enable(int argc, char *argv[])
@@ -1462,17 +1938,6 @@ static void cmd_zero(int argc, char *argv[])
     }
     printf("ANGLE_ZERO: addr=%d\r\n", addr);
     smd_send_cmd(addr, FCT_ANGLE_ZERO, NULL, 0);
-}
-
-static void cmd_clear(int argc, char *argv[])
-{
-    uint8_t addr = get_addr(argc, argv, 1);
-    if (MotionCoordinator_GetOwner() != MOTION_OWNER_NONE) {
-        printf("CLEAR_STATE rejected: motion owner active\r\n");
-        return;
-    }
-    printf("CLEAR_STATE: addr=%d\r\n", addr);
-    smd_clear_state(addr);
 }
 
 /* ====================== QUERY COMMANDS ==================================== */

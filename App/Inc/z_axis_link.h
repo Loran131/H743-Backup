@@ -23,6 +23,9 @@ typedef enum {
     Z_AXIS_STATE_WAIT_ACCEPT,
     Z_AXIS_STATE_MOVING,
     Z_AXIS_STATE_STOPPING,
+    Z_AXIS_STATE_WAIT_CLEAR_FAULT,
+    Z_AXIS_STATE_RECOVERY_VERIFY,
+    Z_AXIS_STATE_WAIT_QUERY_STATUS,
     Z_AXIS_STATE_FAULT
 } ZAxisState;
 
@@ -30,6 +33,7 @@ typedef struct {
     ZAxisState state;
     uint8_t rx_ready;
     uint8_t move_active;
+    uint8_t move_accepted;
     uint8_t last_response_command;
     uint8_t last_status;
     uint32_t actual_speed_hz;
@@ -39,11 +43,20 @@ typedef struct {
     uint32_t frame_errors;
     uint32_t unexpected_frames;
     uint32_t uart_errors;
+    uint32_t uart_ore_errors;
+    uint32_t uart_fe_errors;
+    uint32_t uart_ne_errors;
+    uint32_t uart_pe_errors;
+    uint32_t uart_dma_errors;
+    uint32_t last_uart_error_code;
     uint32_t timeouts;
     uint32_t last_response_tick;
     uint32_t motion_result_seq;
     int32_t motion_result_signed_steps;
     uint8_t motion_result_status;
+    uint32_t recovery_result_seq;
+    uint8_t recovery_result_status;
+    uint32_t controller_fault_status;
 } ZAxisStatus;
 
 void ZAxisLink_Init(uint32_t now);
@@ -57,7 +70,7 @@ void ZAxisLink_Poll(uint32_t now);
 void ZAxisLink_GetStatus(ZAxisStatus *status);
 void ZAxisLink_OnUartError(uint32_t error_code, uint32_t now);
 void ZAxisLink_SetRxReady(uint8_t ready);
-void ZAxisLink_ClearFault(void);
+ZAxisRequestResult ZAxisLink_ClearFault(uint32_t now);
 void ZAxisLink_ResetStream(void);
 const char *ZAxisLink_StateString(ZAxisState state);
 

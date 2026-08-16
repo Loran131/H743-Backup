@@ -8,13 +8,14 @@
 #define XY_START_ACK_TIMEOUT_MS     250U
 #define XY_STOP_ACK_TIMEOUT_MS      250U
 #define XY_QUERY_RESPONSE_TIMEOUT_MS 20U
-#define XY_BUS_GUARD_MS             10U
+#define XY_BUS_GUARD_MS             20U
 #define XY_HOME_BREAK_SETTLE_MS     50U
 #define XY_HOME_MAX_RETRIES         2U
 #define XY_HOME_ZERO_SETTLE_MS      300U
 #define XY_MOVE_STATIC_GUARD_MS     100U
 #define XY_X_SETTLE_TOLERANCE_PULSES 1024
-#define XY_X_SETTLE_POSITION_SAMPLES 3U
+#define XY_Y_SETTLE_TOLERANCE_PULSES 2048
+#define XY_SETTLE_POSITION_SAMPLES  3U
 
 typedef struct {
     XY_AxisStatus status;
@@ -35,14 +36,13 @@ typedef struct {
 enum {
     XY_HOME_STAGE_IDLE = 0,
     XY_HOME_STAGE_BREAK,
-    XY_HOME_STAGE_CLEAR,
     XY_HOME_STAGE_ENABLE,
     XY_HOME_STAGE_PARAMS,
     XY_HOME_STAGE_CLOG_OFF,
     XY_HOME_STAGE_START,
     XY_HOME_STAGE_RUNNING,
     XY_HOME_STAGE_CAPTURE_ZERO,
-    XY_HOME_STAGE_CLOG_ON
+    XY_HOME_STAGE_CLOG_KEEP_OFF
 };
 
 static XY_AxisConfig g_xy_config[XY_AXIS_COUNT] = {
@@ -85,11 +85,12 @@ static uint8_t g_query_outstanding;
 static uint8_t g_query_address;
 static uint8_t g_query_function;
 static XY_Axis g_query_axis;
-static uint8_t g_emergency_stop_pending;
-static uint32_t g_emergency_stop_tick;
 static XY_StopDiagnostics g_stop_diagnostics;
+static uint8_t g_stop_all_stage;
+static uint32_t g_stop_all_next_tick;
 
 static uint8_t xy_command_ack_pending(void);
+static void xy_poll_stop_all(uint32_t now);
 
 static XY_Axis xy_axis_from_address(uint8_t address)
 {
@@ -112,10 +113,9 @@ static int16_t xy_read_be_i16(const uint8_t *data)
     return (int16_t)(((uint16_t)data[0] << 8) | data[1]);
 }
 
-static void xy_set_fault(XY_Axis axis, XY_Fault fault)
+static void xy_set_fault_internal(XY_Axis axis, XY_Fault fault)
 {
     XY_AxisRuntime *runtime = &g_xy_runtime[axis];
-    uint32_t now = HAL_GetTick();
 
     if (runtime->status.state == XY_STATE_FAULT) return;
     runtime->status.fault_function = runtime->status.last_command_function;
@@ -129,8 +129,16 @@ static void xy_set_fault(XY_Axis axis, XY_Fault fault)
     runtime->settle_position_count = 0U;
     runtime->home_stage = XY_HOME_STAGE_IDLE;
     g_query_outstanding = 0U;
-    g_emergency_stop_pending = 1U;
-    g_emergency_stop_tick = now + XY_BUS_GUARD_MS;
+}
+
+static void xy_set_fault(XY_Axis axis, XY_Fault fault)
+{
+    xy_set_fault_internal(axis, fault);
+}
+
+static void xy_set_stop_fault(XY_Axis axis)
+{
+    xy_set_fault_internal(axis, XY_FAULT_STOP_UNCONFIRMED);
 }
 
 static uint8_t xy_response_callback(const SmdResponse *response)
@@ -150,6 +158,10 @@ static uint8_t xy_response_callback(const SmdResponse *response)
     }
 
     if (response->result != ACK_SUCCEED) {
+        if (runtime->waiting_stop_ack != 0U) {
+            xy_set_stop_fault(axis);
+            return 1U;
+        }
         if ((runtime->waiting_move_ack != 0U) ||
             (runtime->waiting_home_ack != 0U) ||
             (runtime->waiting_zero_ack != 0U)) {
@@ -205,25 +217,28 @@ static uint8_t xy_response_callback(const SmdResponse *response)
                 runtime->status.position_valid = 1U;
                 runtime->waiting_home_ack = 0U;
                 runtime->status.home_retry_count = 0U;
-                runtime->home_stage = XY_HOME_STAGE_CLOG_ON;
+                runtime->home_stage = XY_HOME_STAGE_CLOG_KEEP_OFF;
                 runtime->home_next_action_tick = response->rx_tick +
                                                  XY_BUS_GUARD_MS;
             } else if (runtime->status.position_valid != 0U) {
                 int64_t position_error;
+                int32_t settle_tolerance;
                 runtime->status.position_pulses =
                     runtime->raw_position_pulses - runtime->zero_offset_pulses;
                 position_error = (int64_t)runtime->status.position_pulses -
                                  runtime->status.target_pulses;
-                if ((axis == XY_AXIS_X) &&
-                    (runtime->status.state == XY_STATE_MOVING) &&
-                    (position_error >= -XY_X_SETTLE_TOLERANCE_PULSES) &&
-                    (position_error <= XY_X_SETTLE_TOLERANCE_PULSES)) {
+                settle_tolerance = (axis == XY_AXIS_X) ?
+                    XY_X_SETTLE_TOLERANCE_PULSES :
+                    XY_Y_SETTLE_TOLERANCE_PULSES;
+                if ((runtime->status.state == XY_STATE_MOVING) &&
+                    (position_error >= -settle_tolerance) &&
+                    (position_error <= settle_tolerance)) {
                     if (runtime->settle_position_count <
-                        XY_X_SETTLE_POSITION_SAMPLES) {
+                        XY_SETTLE_POSITION_SAMPLES) {
                         ++runtime->settle_position_count;
                     }
                     if (runtime->settle_position_count >=
-                        XY_X_SETTLE_POSITION_SAMPLES) {
+                        XY_SETTLE_POSITION_SAMPLES) {
                         runtime->status.target_pulses =
                             runtime->status.position_pulses;
                         runtime->status.state = XY_STATE_IDLE;
@@ -302,21 +317,11 @@ static uint8_t xy_response_callback(const SmdResponse *response)
 
     case FCT_ORIGIN_BREAK:
         if (runtime->home_stage == XY_HOME_STAGE_BREAK) {
-            runtime->home_stage = XY_HOME_STAGE_CLEAR;
+            runtime->home_stage = XY_HOME_STAGE_ENABLE;
             runtime->waiting_home_ack = 0U;
             runtime->status.home_retry_count = 0U;
             runtime->home_next_action_tick = response->rx_tick +
                                              XY_HOME_BREAK_SETTLE_MS;
-            return 1U;
-        }
-        return 0U;
-
-    case FCT_CLEAR_STATE:
-        if (runtime->home_stage == XY_HOME_STAGE_CLEAR) {
-            runtime->home_stage = XY_HOME_STAGE_ENABLE;
-            runtime->waiting_home_ack = 0U;
-            runtime->status.home_retry_count = 0U;
-            runtime->home_next_action_tick = response->rx_tick + XY_BUS_GUARD_MS;
             return 1U;
         }
         return 0U;
@@ -349,7 +354,7 @@ static uint8_t xy_response_callback(const SmdResponse *response)
             runtime->home_next_action_tick = response->rx_tick + XY_BUS_GUARD_MS;
             return 1U;
         }
-        if (runtime->home_stage == XY_HOME_STAGE_CLOG_ON) {
+        if (runtime->home_stage == XY_HOME_STAGE_CLOG_KEEP_OFF) {
             runtime->waiting_home_ack = 0U;
             runtime->status.home_retry_count = 0U;
             runtime->status.state = XY_STATE_IDLE;
@@ -394,9 +399,9 @@ void XY_Motor_Init(uint32_t now)
     g_query_sent_tick = now;
     g_query_outstanding = 0U;
     g_query_axis = XY_AXIS_X;
-    g_emergency_stop_pending = 0U;
+    g_stop_all_stage = 0U;
+    g_stop_all_next_tick = now;
     memset(&g_stop_diagnostics, 0, sizeof(g_stop_diagnostics));
-    g_emergency_stop_tick = now;
     memset(&g_xy_startup, 0, sizeof(g_xy_startup));
     g_xy_startup.state = XY_STARTUP_WAITING_REPLIES;
     g_xy_startup.start_tick = now;
@@ -506,10 +511,6 @@ static uint8_t xy_poll_home_action(XY_Axis axis, uint32_t now)
         function = FCT_ORIGIN_BREAK;
         length = 0U;
         break;
-    case XY_HOME_STAGE_CLEAR:
-        function = FCT_CLEAR_STATE;
-        length = 0U;
-        break;
     case XY_HOME_STAGE_ENABLE:
         function = FCT_MOTOR_ENABLE;
         data[0] = 0U;
@@ -528,9 +529,9 @@ static uint8_t xy_poll_home_action(XY_Axis axis, uint32_t now)
         data[0] = 0U;
         length = 1U;
         break;
-    case XY_HOME_STAGE_CLOG_ON:
+    case XY_HOME_STAGE_CLOG_KEEP_OFF:
         function = FCT_SET_CLOG_PRO;
-        data[0] = 1U;
+        data[0] = 0U;
         length = 1U;
         break;
     case XY_HOME_STAGE_CAPTURE_ZERO:
@@ -639,12 +640,12 @@ void XY_Motor_Poll(uint32_t now)
         if ((runtime->waiting_stop_ack != 0U) &&
             ((uint32_t)(now - runtime->status.command_tick) >
              XY_STOP_ACK_TIMEOUT_MS)) {
-            xy_set_fault((XY_Axis)i, XY_FAULT_STOP_UNCONFIRMED);
+            xy_set_stop_fault((XY_Axis)i);
         }
         if ((runtime->status.state == XY_STATE_STOPPING) &&
             ((uint32_t)(now - runtime->status.command_tick) >
              XY_STOP_ACK_TIMEOUT_MS)) {
-            xy_set_fault((XY_Axis)i, XY_FAULT_STOP_UNCONFIRMED);
+            xy_set_stop_fault((XY_Axis)i);
         }
         if ((runtime->status.state == XY_STATE_HOMING) &&
             ((uint32_t)(now - runtime->home_start_tick) >
@@ -664,13 +665,8 @@ void XY_Motor_Poll(uint32_t now)
             xy_set_fault((XY_Axis)i, XY_FAULT_FEEDBACK_TIMEOUT);
         }
     }
-    if ((g_emergency_stop_pending != 0U) &&
-        ((int32_t)(now - g_emergency_stop_tick) >= 0)) {
-        (void)smd_send_cmd(SMD_BROADCAST_ADDR, FCT_STOP_NOW, NULL, 0U);
-        ++g_stop_diagnostics.fault_broadcast_count;
-        g_emergency_stop_pending = 0U;
-        return;
-    }
+    xy_poll_stop_all(now);
+    if (g_stop_all_stage != 0U) return;
     if (xy_command_ack_pending() == 0U) {
         for (uint8_t i = 0U; i < XY_AXIS_COUNT; ++i) {
             if (xy_poll_home_action((XY_Axis)i, now) != 0U) return;
@@ -760,48 +756,58 @@ XY_Result XY_MoveAbsolute(XY_Axis axis, int32_t target_pulses,
     return XY_MoveRelative(axis, (int32_t)delta, speed_rpm, acceleration);
 }
 
-void XY_Stop(XY_Axis axis)
+uint8_t XY_Stop(XY_Axis axis)
 {
     XY_AxisRuntime *runtime;
     uint8_t address;
-    if (axis >= XY_AXIS_COUNT) return;
+    if (axis >= XY_AXIS_COUNT) return 0U;
     runtime = &g_xy_runtime[axis];
     g_query_outstanding = 0U;
     address = g_xy_config[axis].motor_address;
-    (void)smd_send_cmd(address, FCT_STOP_NOW, NULL, 0U);
     runtime->status.command_tick = HAL_GetTick();
     runtime->status.last_command_function = FCT_STOP_NOW;
+    runtime->status.completion_tick = 0U;
+    runtime->status.completion_source = XY_COMPLETION_NONE;
+    if (smd_send_cmd(address, FCT_STOP_NOW, NULL, 0U) != 0U) {
+        xy_set_stop_fault(axis);
+        return 0U;
+    }
     runtime->status.state = XY_STATE_STOPPING;
     runtime->waiting_stop_ack = 1U;
     runtime->waiting_move_ack = 0U;
     runtime->waiting_home_ack = 0U;
     runtime->settle_position_count = 0U;
     ++g_stop_diagnostics.stop_api_count;
+    return 1U;
 }
 
 uint8_t xy_stop_all(void)
 {
     uint32_t now = HAL_GetTick();
-
-    /* One broadcast avoids simultaneous X/Y replies in the shared RX stream. */
+    if (g_stop_all_stage != 0U) return 1U;
     g_query_outstanding = 0U;
-    if (smd_send_cmd(SMD_BROADCAST_ADDR, FCT_STOP_NOW, NULL, 0U) != 0U) {
-        return 0U;
-    }
     ++g_stop_diagnostics.stop_all_count;
-    for (uint8_t i = 0U; i < XY_AXIS_COUNT; ++i) {
-        XY_AxisRuntime *runtime = &g_xy_runtime[i];
-        runtime->status.command_tick = now;
-        runtime->status.position_valid = 0U;
-        runtime->status.state = XY_STATE_UNREFERENCED;
-        runtime->waiting_move_ack = 0U;
-        runtime->waiting_stop_ack = 0U;
-        runtime->waiting_home_ack = 0U;
-        runtime->waiting_zero_ack = 0U;
-        runtime->home_stage = XY_HOME_STAGE_IDLE;
-        runtime->settle_position_count = 0U;
-    }
+    (void)XY_Stop(XY_AXIS_X);
+    g_stop_all_next_tick = now + XY_BUS_GUARD_MS;
+    g_stop_all_stage = 1U;
     return 1U;
+}
+
+static void xy_poll_stop_all(uint32_t now)
+{
+    if (g_stop_all_stage == 1U) {
+        if ((int32_t)(now - g_stop_all_next_tick) < 0) return;
+        (void)XY_Stop(XY_AXIS_Y);
+        g_stop_all_stage = 2U;
+        return;
+    }
+    if ((g_stop_all_stage == 2U) &&
+        (g_xy_runtime[XY_AXIS_X].waiting_stop_ack == 0U) &&
+        (g_xy_runtime[XY_AXIS_Y].waiting_stop_ack == 0U) &&
+        (g_xy_runtime[XY_AXIS_X].status.state != XY_STATE_STOPPING) &&
+        (g_xy_runtime[XY_AXIS_Y].status.state != XY_STATE_STOPPING)) {
+        g_stop_all_stage = 0U;
+    }
 }
 
 XY_Result XY_HomeSensorless(XY_Axis axis)
@@ -851,23 +857,6 @@ XY_Result XY_SetCurrentPositionAsZero(XY_Axis axis)
     runtime->status.command_tick = HAL_GetTick();
     runtime->status.last_command_function = FCT_ANGLE_ZERO;
     runtime->waiting_zero_ack = 1U;
-    return XY_RESULT_OK;
-}
-
-XY_Result XY_ClearFault(XY_Axis axis)
-{
-    XY_AxisRuntime *runtime;
-    if (axis >= XY_AXIS_COUNT) return XY_RESULT_INVALID_AXIS;
-    runtime = &g_xy_runtime[axis];
-    if (runtime->status.state != XY_STATE_FAULT) return XY_RESULT_OK;
-    if (smd_send_cmd(g_xy_config[axis].motor_address, FCT_CLEAR_STATE,
-                     NULL, 0U) != 0U) {
-        return XY_RESULT_CAN_REJECTED;
-    }
-    runtime->status.fault = XY_FAULT_NONE;
-    runtime->status.state = runtime->status.position_valid ?
-                            XY_STATE_IDLE : XY_STATE_UNREFERENCED;
-    runtime->status.command_tick = HAL_GetTick();
     return XY_RESULT_OK;
 }
 

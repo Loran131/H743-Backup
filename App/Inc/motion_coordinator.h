@@ -19,8 +19,7 @@ typedef enum {
 
 typedef enum {
     MOTION_LATCH_NONE = 0,
-    MOTION_LATCH_ABORT,
-    MOTION_LATCH_AXIS_FAULT
+    MOTION_LATCH_ABORT
 } MotionLatchReason;
 
 typedef struct {
@@ -56,7 +55,7 @@ uint8_t MotionCoordinator_SetRequiredMask(MotionOwner owner,
 uint8_t MotionCoordinator_SetIdleRequiredMask(uint8_t required_mask);
 void MotionCoordinator_SetManualHold(uint8_t hold);
 void MotionCoordinator_RequestAbort(void);
-uint8_t MotionCoordinator_Resume(uint32_t now);
+void MotionCoordinator_RequestCancel(MotionOwner owner);
 uint8_t MotionCoordinator_CaptureSnapshot(MotionPositionSnapshot *snapshot,
                                           uint8_t require_idle,
                                           uint32_t now);

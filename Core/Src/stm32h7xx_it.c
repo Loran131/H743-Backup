@@ -201,12 +201,12 @@ void DMA1_Stream0_IRQHandler(void)
 
 void DMA1_Stream1_IRQHandler(void)
 {
-  HAL_DMA_IRQHandler(&hdma_uart4_rx);
+  HAL_DMA_IRQHandler(&hdma_usart6_rx);
 }
 
 void DMA1_Stream2_IRQHandler(void)
 {
-  HAL_DMA_IRQHandler(&hdma_uart4_tx);
+  HAL_DMA_IRQHandler(&hdma_usart6_tx);
 }
 
 void USART1_IRQHandler(void)
@@ -219,9 +219,9 @@ void USART3_IRQHandler(void)
   HAL_UART_IRQHandler(&huart3);
 }
 
-void UART4_IRQHandler(void)
+void USART6_IRQHandler(void)
 {
-  HAL_UART_IRQHandler(&huart4);
+  HAL_UART_IRQHandler(&huart6);
 }
 
 void FDCAN2_IT0_IRQHandler(void)

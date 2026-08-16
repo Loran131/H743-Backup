@@ -8,16 +8,14 @@
 
 static ZAxisControlStatus g_z;
 static uint32_t g_last_motion_result_seq;
+static uint32_t g_last_recovery_result_seq;
 static uint32_t g_last_uart_errors;
 static uint32_t g_last_timeouts;
 static uint8_t g_track_active_move;
 
-static void z_invalidate(ZAxisControlFault fault, uint32_t now)
+static void z_set_fault(ZAxisControlFault fault, uint32_t now)
 {
     if (g_z.state == Z_STATE_FAULT) return;
-    if (fault == Z_FAULT_POSITION_UNCERTAIN) {
-        g_z.position_valid = 0U;
-    }
     g_z.fault = fault;
     g_z.last_fault = fault;
     g_z.last_fault_tick = now;
@@ -35,6 +33,7 @@ void ZAxis_Init(uint32_t now)
     g_z.rx_ready = link.rx_ready;
     g_z.command_tick = now;
     g_last_motion_result_seq = link.motion_result_seq;
+    g_last_recovery_result_seq = link.recovery_result_seq;
     g_last_uart_errors = link.uart_errors;
     g_last_timeouts = link.timeouts;
     g_track_active_move = 0U;
@@ -61,14 +60,14 @@ void ZAxis_Poll(uint32_t now)
                             Z_STATE_STOPPING : Z_STATE_UNREFERENCED;
                 g_z.fault = Z_FAULT_NONE;
             } else {
-                z_invalidate(Z_FAULT_CONTROLLER_REJECTED, now);
+                z_set_fault(Z_FAULT_CONTROLLER_REJECTED, now);
             }
         } else {
             position = (int64_t)g_z.position_pulses +
                        link.motion_result_signed_steps;
             if ((position < Z_AXIS_SOFT_MIN_PULSES) ||
                 (position > Z_AXIS_SOFT_MAX_PULSES)) {
-                z_invalidate(Z_FAULT_POSITION_UNCERTAIN, now);
+                z_set_fault(Z_FAULT_POSITION_UNCERTAIN, now);
             } else {
                 g_z.position_pulses = (int32_t)position;
                 ++g_z.completed_moves;
@@ -80,37 +79,40 @@ void ZAxis_Poll(uint32_t now)
                                 Z_STATE_STOPPING : Z_STATE_IDLE;
                     g_z.fault = Z_FAULT_NONE;
                 } else {
-                    z_invalidate(Z_FAULT_CONTROLLER_REJECTED, now);
+                    /* F103 reported the actual completed pulse count. */
+                    z_set_fault(Z_FAULT_CONTROLLER_REJECTED, now);
                 }
             }
         }
         g_track_active_move = 0U;
     }
 
-    if (link.uart_errors != g_last_uart_errors) {
-        g_last_uart_errors = link.uart_errors;
-        z_invalidate(Z_FAULT_LINK, now);
-    }
-    if (link.timeouts != g_last_timeouts) {
-        g_last_timeouts = link.timeouts;
-        z_invalidate(Z_FAULT_TIMEOUT, now);
-    }
-    if ((link.state == Z_AXIS_STATE_FAULT) &&
-        (g_z.state != Z_STATE_FAULT)) {
-        z_invalidate(Z_FAULT_CONTROLLER_REJECTED, now);
-    }
-
-    if ((g_z.state == Z_STATE_FAULT) && (link.rx_ready != 0U)) {
-        ZAxisLink_ClearFault();
-        ZAxisLink_GetStatus(&link);
-        if (link.state != Z_AXIS_STATE_FAULT) {
+    if (link.recovery_result_seq != g_last_recovery_result_seq) {
+        g_last_recovery_result_seq = link.recovery_result_seq;
+        if (link.recovery_result_status == 0x01U) {
             g_z.fault = Z_FAULT_NONE;
             g_z.target_pulses = g_z.position_pulses;
             g_z.state = g_z.position_valid ? Z_STATE_IDLE :
                                                Z_STATE_UNREFERENCED;
             g_track_active_move = 0U;
             ++g_z.auto_recovery_count;
+        } else {
+            z_set_fault(Z_FAULT_CONTROLLER_REJECTED, now);
         }
+    }
+
+    if (link.uart_errors != g_last_uart_errors) {
+        g_last_uart_errors = link.uart_errors;
+        /* USART6 restarts RX DMA and preserves the current link transaction.
+           Escalate only if the existing transaction deadline later expires. */
+    }
+    if (link.timeouts != g_last_timeouts) {
+        g_last_timeouts = link.timeouts;
+        z_set_fault(Z_FAULT_TIMEOUT, now);
+    }
+    if ((link.state == Z_AXIS_STATE_FAULT) &&
+        (g_z.state != Z_STATE_FAULT)) {
+        z_set_fault(Z_FAULT_CONTROLLER_REJECTED, now);
     }
 
     if (g_z.state == Z_STATE_STARTING) {
@@ -208,14 +210,18 @@ ZAxisControlResult ZAxisControl_SetZero(void)
 ZAxisControlResult ZAxisControl_ClearFault(void)
 {
     ZAxisStatus link;
+    ZAxisRequestResult result;
     ZAxisLink_GetStatus(&link);
+    if (g_z.state == Z_STATE_RECOVERING) return Z_RESULT_BUSY;
     if ((g_z.state != Z_STATE_FAULT) &&
         (link.state != Z_AXIS_STATE_FAULT)) return Z_RESULT_OK;
     if (link.rx_ready == 0U) return Z_RESULT_LINK_ERROR;
-    ZAxisLink_ClearFault();
-    g_z.fault = Z_FAULT_NONE;
+    result = ZAxisLink_ClearFault(HAL_GetTick());
+    if (result == Z_AXIS_REQUEST_BUSY) return Z_RESULT_BUSY;
+    if (result != Z_AXIS_REQUEST_OK) return Z_RESULT_LINK_ERROR;
     g_z.target_pulses = g_z.position_pulses;
-    g_z.state = g_z.position_valid ? Z_STATE_IDLE : Z_STATE_UNREFERENCED;
+    g_z.state = Z_STATE_RECOVERING;
+    g_z.command_tick = HAL_GetTick();
     g_track_active_move = 0U;
     return Z_RESULT_OK;
 }
@@ -233,7 +239,8 @@ void ZAxis_GetControlStatus(ZAxisControlStatus *status)
 const char *ZAxis_StateString(ZAxisControlState state)
 {
     static const char *const names[] = {
-        "UNREFERENCED", "IDLE", "STARTING", "MOVING", "STOPPING", "FAULT"
+        "UNREFERENCED", "IDLE", "STARTING", "MOVING", "STOPPING",
+        "RECOVERING", "FAULT"
     };
     return (state <= Z_STATE_FAULT) ? names[state] : "UNKNOWN";
 }
