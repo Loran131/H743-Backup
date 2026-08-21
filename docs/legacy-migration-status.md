@@ -32,7 +32,8 @@
 - 三个板载 LED；
 - FreeRTOS 的 LegacyIoTask、ShellTask、MonitorTask；
 - 依赖关键任务心跳的 IWDG；
-- 原有 LwIP 和 TCP 5000 服务。
+- LwIP 和 TCP 5000 服务；原 LED 测试接口已替换为单行 `OK/ERR` 远程控制协议，V1 支持
+  系统状态、P7 任务、取消、全局急停、逻辑载荷和配置查询。
 - X/Y 控制层：固定地址 1/2、脉冲坐标、软限位、非阻塞反馈、双轴停止；
 - 保留人工触发的 X/Y 无限位回零和人工设零入口；启动流程仅在两台驱动器均确认在线后
   自动回零一次，故障恢复不会自动回零或续跑。
@@ -85,7 +86,7 @@
 - K230 数据新鲜度门限为 150 ms；P2 仍只接受 `VALID=1`、`STALE=0`、达到 `READY`
   且 `sample_seq` 变化的新样本。
 - P4 初始参数为 470 ms 决策周期、0.5 比例增益、像素死区 `+-3`、连续 3 个独立样本
-  稳定、X/Z 单次限幅 24000/6400 脉冲、Z 10000 Hz、视觉超时 500 ms、总时限 60 s、
+  稳定、X/Z 单次限幅 512000/57600 脉冲、Z 10000 Hz、视觉超时 500 ms、总时限 60 s、
   最多 50 轮修正；Z 目标始终受实际软件范围 `0..576000` 约束。X/Z 使用同一个缩放因子
   同时满足两轴单步上限和剩余行程，保持逆矩阵算出的二维修正方向；禁止分别裁剪两个分量。
 - P5 的夹爪停止语义是冻结当前状态并拒绝后续夹爪命令，不主动开爪。当前 C552 协议没有
@@ -97,10 +98,9 @@
   `CLEAR_STATE (0xFB)` 的协议常量、控制 API、Shell 命令和自动恢复路径。
 - `xyz_snapshot` 仅在 X/Y/Z 三个坐标均有效、无故障且均为 `IDLE` 时返回快照；任一坐标
   无效时整份快照失败，禁止保存部分有效姿态。
-- P7 不为未板测运动参数提供默认值。每个任务分别配置目标中心、Y 盲走参数和按需的 TOF3
-  下降参数；所有任务通过预检后先按 Z、X、Y 顺序移动到固定预设位置
-  `(X=512000, Y=0, Z=77600)`。`tag_put` 和 `frame_put` 还要求单独配置有效的安全撤离位姿；
-  固定预设位置不替代该配置。任务活动期间配置不可修改。
+- P7 不为未板测的视觉、盲走和 TOF3 参数提供默认值。每个任务分别配置这些参数，并各自持有
+  预设位置和安全回归位置，默认分别为 `(X=1012000, Y=0, Z=187600)` 和
+  `(X=1012000, Y=0, Z=0)`；两组位置均可通过 Shell 按任务修改。任务活动期间配置不可修改。
 - C552 当前没有夹持物检测字段；P7 的 `PRECHECK_HELD` 使用最近一次 GripClose/GripOpen
   `APPLIED` 后维护的逻辑状态。上电默认 `EMPTY`，若设备带物上电，必须先执行
   `mission_payload held`。此状态不是力传感器或物体存在检测。
@@ -109,6 +109,11 @@
   `CLEAR_FAULT` 应答和 `QUERY_STATUS` 健康确认，再等待 50 ms 重试，且不消耗子流程尝试。
   `sf_status` 和 `mission_status` 分开显示 `attempt` 与 `z_recovery`；
   持续故障达到 10 次后仍终止任务，不绕过软限位或坐标有效性检查。
+- P7 四个任务均支持任务级故障重启：普通可恢复故障先等待三轴停止，再按 Z、X、Y 回到该任务
+  `preset`，随后从任务预检重新开始；`mission_status` 显示 `restart=n/10`。任务级重启不重置
+  600 秒总时限，网络命令在重试期间保持运行态。
+- 坐标无效、轴 FAULT、软限位、配置或载荷前置条件错误、人工取消、全局 ABORT 和任务总超时
+  不执行自动回位，仍进入终态故障，避免在坐标或安全状态不可信时强制运动。
 
 ## 尚未完成
 
@@ -116,9 +121,9 @@
   任务链中完成实际收发和运动验证；急停、持续故障恢复、长行程超时及长时间稳定性仍需专项板测。
   Shell `z_clear` 只启动 Z 轴 `CLEAR_FAULT -> QUERY_STATUS` 恢复事务，不访问 X/Y CAN。
 - P7 的 `red_pick`、`red_find`、`tag_put` 已完成实机完整流程；`frame_put` 尚未通过。
-  任务目标中心、Y 轴 `pulses_per_mm`、盲走截止距离、TOF3 最大下降量/方向和安全位姿由板测配置；
-  四任务配置和安全位姿保存在
-  EEPROM `128..239`，使用 magic/version/generation/CRC32 校验并在上电时自动加载，不使用未经
+  任务目标中心、Y 轴 `pulses_per_mm`、盲走截止距离和 TOF3 最大下降量/方向由板测配置；
+  四任务配置、各自预设位置和安全回归位置保存在
+  EEPROM `128..255`，使用 V2 紧凑记录、magic/version/generation/CRC32 校验并在上电时自动加载，不使用未经
   测量的运动默认值。逻辑持物状态不持久化，带物上电仍需执行 `mission_payload held`。
   抓取后的 `VERIFY` 仅确认逻辑持物状态，不执行已作废的视觉计数验证，
   避免被夹持物遮挡相机造成必然误判。
@@ -149,8 +154,8 @@
 - P4 首轮板测发现分别将 X/Z 限幅为 12000/640 会严重改变逆矩阵修正比例，使其中一个像素
   分量反向增大；已改为二维向量同比例缩放。`p4_status` 分开显示最新 `latest` 像素和本轮
   实际参与计算的 `decision` 像素，并显示 `raw`、`scale` 和最终 `step`，避免混合时刻误判。
-  为缩短大误差对正时间，后续将保守限幅提高到 X/Z 24000/6400 脉冲；两者仍显著低于
-  P3 实机标定步长 51200/57600 脉冲。
+  当前位置环统一单轴限幅为 X=512000、Y=10000、Z=57600 脉冲；XZ 对正仍使用二维向量
+  同比例缩放，以避免分别裁剪破坏标定矩阵给出的修正方向。
 
 ## P2 第一版视觉标定
 
@@ -259,7 +264,7 @@ CMake Debug 构建成功：FLASH 284268 B / 2 MB，输出 `build/Debug/TestH743.
 5. 使用 `sf_grip <task> open|close`，确认 `ACCEPTED` 不完成流程，只有 `APPLIED` 才完成；
    失败最多尝试 10 次。
 6. 三轴有效且空闲时执行 `sf_record <task>`，移动后执行 `sf_return <task>`。先用
-   `sf_safe_set <x> <y> <z>` 设置限位内安全位姿，再执行 `sf_retreat <task>`；SafeRetreat
+   `sf_safe_set <task> <x> <y> <z>` 设置限位内安全回归位置，再执行 `sf_retreat <task>`；SafeRetreat
    对 `tag_put` 按 Y、Z、X 顺序，其他任务按 Z、X、Y 顺序；当前任一坐标无效时拒绝启动。
 7. 运行任一子流程时执行 `sf_abort`，确认只取消当前子流程、不产生全局锁存；再运行并执行
    `abort`，确认 X/Y/Z 停止、夹爪冻结且重启前不能重新取得 owner。
@@ -298,14 +303,15 @@ P7 四任务参数与安全位姿会自动保存到 EEPROM；配置命令返回 
 3. 为红框放置配置下视目标和必需的 TOF3 下降：
    `mission_align_set frame_put <x> <y>`、
    `mission_z_set frame_put <stop_mm> <max_pulses> <-1|1>`。
-4. 放置任务前执行 `sf_safe_set <x> <y> <z>` 设置限位内安全位姿。正常抓取成功会将逻辑状态
+4. 可执行 `mission_preset_set <task> <x> <y> <z>` 和 `mission_safe_set <task> <x> <y> <z>`
+   分别调整任务预设位置和安全回归位置。正常抓取成功会将逻辑状态
    更新为 `HELD`；若带物上电，用 `mission_payload held` 显式恢复，放置成功后应变为 `EMPTY`。
 5. 用 `mission_status [task]` 检查当前状态和指定任务配置。缺少配置的 bit detail 为：
-   `1=目标中心`、`2=Y盲走`、`4=Z下降`、`8=安全位姿`。随后执行
-   `mission_start red_pick|tag_put|red_find|frame_put`。四个任务通过 PRECHECK/PRECHECK_HELD 后
-   均应先经过 `PRESET_POSE`，按 Z、X、Y 顺序到达 `Z=77600`、`X=512000`、`Y=0`。
-6. red_pick/red_find 应依次经过 PRESET_POSE、RED_OBSERVE、FRONT_RED_READY、ALIGN_XZ、STABLE、RECORD_XYZ、
-   BLIND_Y、GRIP_CLOSE、RETURN_RECORDED_POSE、VERIFY、COMPLETE。VERIFY 只检查逻辑 `HELD`，
+   `1=目标中心`、`2=Y盲走`、`4=Z下降`、`8=预设/安全位置`。随后执行
+   `mission_start red_pick|tag_put|red_find|frame_put`。`red_pick`/`red_find` 通过 PRECHECK 后先取得
+   夹爪打开 `APPLIED`，四个任务随后均经过 `PRESET_POSE`，按 Z、X、Y 顺序到达各自预设位置。
+6. red_pick/red_find 应依次经过 PREPARE_GRIP_OPEN、PRESET_POSE、RED_OBSERVE、FRONT_RED_READY、ALIGN_XZ、STABLE、RECORD_XYZ、
+   BLIND_Y、GRIP_CLOSE、RETURN_RECORDED_POSE、VERIFY、SAFE_RETREAT、COMPLETE。VERIFY 只检查逻辑 `HELD`，
    不读取被物块遮挡的相机。
 7. tag_put 应经过 PRESET_POSE、TAG_OBSERVE、FRONT_TAG_READY、ALIGN_XZ、STABLE、BLIND_Y、
    OPTIONAL_Z_DROP、GRIP_OPEN、SAFE_RETREAT、COMPLETE；`mission_z_set tag_put off` 时

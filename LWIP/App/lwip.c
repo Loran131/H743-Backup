@@ -30,6 +30,8 @@
 
 /* USER CODE BEGIN 0 */
 
+#include "network_config.h"
+
 /* USER CODE END 0 */
 /* Private function prototypes -----------------------------------------------*/
 static void ethernet_link_status_updated(struct netif *netif);
@@ -77,6 +79,19 @@ void MX_LWIP_Init(void)
   GATEWAY_ADDRESS[3] = 0;
 
 /* USER CODE BEGIN IP_ADDRESSES */
+  IP_ADDRESS[0] = NETWORK_IP_0;
+  IP_ADDRESS[1] = NETWORK_IP_1;
+  IP_ADDRESS[2] = NETWORK_IP_2;
+  IP_ADDRESS[3] = NETWORK_IP_3;
+  NETMASK_ADDRESS[0] = NETWORK_NETMASK_0;
+  NETMASK_ADDRESS[1] = NETWORK_NETMASK_1;
+  NETMASK_ADDRESS[2] = NETWORK_NETMASK_2;
+  NETMASK_ADDRESS[3] = NETWORK_NETMASK_3;
+  GATEWAY_ADDRESS[0] = NETWORK_GATEWAY_0;
+  GATEWAY_ADDRESS[1] = NETWORK_GATEWAY_1;
+  GATEWAY_ADDRESS[2] = NETWORK_GATEWAY_2;
+  GATEWAY_ADDRESS[3] = NETWORK_GATEWAY_3;
+
   HAL_Delay(300U);
   HAL_GPIO_WritePin(ETH_RESET_GPIO_Port, ETH_RESET_Pin, GPIO_PIN_SET);
   HAL_Delay(1000U);

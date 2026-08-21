@@ -49,7 +49,7 @@ static XY_AxisConfig g_xy_config[XY_AXIS_COUNT] = {
     {
         .motor_address = XY_X_MOTOR_ADDRESS,
         .positive_direction = XY_POSITIVE_DIRECTION,
-        .acceleration = 100U,
+        .acceleration = 10U,
         .default_speed_rpm = 3000U,
         .max_speed_rpm = 3000U,
         .soft_min_pulses = 0,

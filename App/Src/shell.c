@@ -49,9 +49,11 @@ static const char *g_help_text =
     "  sf_blind_y <task> <tof1|tof2> <stop_mm> <pulses_per_mm> <dir>\r\n"
     "  sf_descend <task> <stop_mm> <max_pulses> <dir>\r\n"
     "  sf_grip <task> <open|close> / sf_record / sf_return\r\n"
-    "  sf_safe_set <x> <y> <z> / sf_retreat <task>\r\n"
+    "  sf_safe_set <task> <x> <y> <z> / sf_retreat <task>\r\n"
     "  mission_start <task> / mission_status [task] / mission_abort\r\n"
     "  mission_payload <empty|held>\r\n"
+    "  mission_preset_set <task> <x> <y> <z>\r\n"
+    "  mission_safe_set <task> <x> <y> <z>\r\n"
     "  mission_align_set <task> <target_x> <target_y>\r\n"
     "  mission_blind_set <task> <stop_mm> <pulses_per_mm> <dir>\r\n"
     "  mission_z_set <tag_put|frame_put> <off|stop_mm max_pulses dir>\r\n"
@@ -219,6 +221,8 @@ static void cmd_mission_start(int argc, char *argv[]);
 static void cmd_mission_status(int argc, char *argv[]);
 static void cmd_mission_abort(int argc, char *argv[]);
 static void cmd_mission_payload(int argc, char *argv[]);
+static void cmd_mission_preset_set(int argc, char *argv[]);
+static void cmd_mission_safe_set(int argc, char *argv[]);
 static void cmd_mission_align_set(int argc, char *argv[]);
 static void cmd_mission_blind_set(int argc, char *argv[]);
 static void cmd_mission_z_set(int argc, char *argv[]);
@@ -278,12 +282,16 @@ static const ShellCmd_t g_cmd_table[] = {
     {"sf_grip", "<task> <open|close>", 3, cmd_sf_grip},
     {"sf_record", "<task>", 2, cmd_sf_record},
     {"sf_return", "<task>", 2, cmd_sf_return},
-    {"sf_safe_set", "<x> <y> <z>", 4, cmd_sf_safe_set},
+    {"sf_safe_set", "<task> <x> <y> <z>", 5, cmd_sf_safe_set},
     {"sf_retreat", "<task>", 2, cmd_sf_retreat},
     {"mission_start", "<task>", 2, cmd_mission_start},
     {"mission_status", "[task]", 1, cmd_mission_status},
     {"mission_abort", "", 1, cmd_mission_abort},
     {"mission_payload", "<empty|held>", 2, cmd_mission_payload},
+    {"mission_preset_set", "<task> <x> <y> <z>", 5,
+     cmd_mission_preset_set},
+    {"mission_safe_set", "<task> <x> <y> <z>", 5,
+     cmd_mission_safe_set},
     {"mission_align_set", "<task> <target_x> <target_y>", 4,
      cmd_mission_align_set},
     {"mission_blind_set", "<task> <stop_mm> <pulses_per_mm> <dir>", 5,
@@ -1620,36 +1628,44 @@ static void cmd_sf_return(int argc, char *argv[])
 
 static void cmd_sf_safe_set(int argc, char *argv[])
 {
-    MotionPositionSnapshot pose;
-    uint8_t set;
+    MissionTaskName task;
+    int32_t x;
+    int32_t y;
+    int32_t z;
     (void)argc;
     if (shell_allow_standalone_subflow() == 0U) return;
-    pose.x_pulses = (int32_t)strtol(argv[1], NULL, 0);
-    pose.y_pulses = (int32_t)strtol(argv[2], NULL, 0);
-    pose.z_pulses = (int32_t)strtol(argv[3], NULL, 0);
-    pose.capture_tick = HAL_GetTick();
-    set = MissionSubflow_SetSafePose(&pose);
-    if (set == 0U) {
-        printf("[P6] safe pose set: REJECTED (limits)\r\n");
-    } else if (MissionTask_SaveConfiguration() == 0U) {
-        printf("[P6] safe pose set: RAM_ONLY (EEPROM write failed)\r\n");
-    } else {
-        printf("[P6] safe pose set: OK (persisted)\r\n");
+    if (shell_parse_task(argv[1], &task) == 0U) {
+        printf("Usage: sf_safe_set <task> <x> <y> <z>\r\n");
+        return;
     }
+    x = (int32_t)strtol(argv[2], NULL, 0);
+    y = (int32_t)strtol(argv[3], NULL, 0);
+    z = (int32_t)strtol(argv[4], NULL, 0);
+    printf("[P6] %s safe pose set: %s\r\n",
+           MissionSubflow_TaskString(task),
+           MissionTask_SetSafePose(task, x, y, z) ?
+           "OK (persisted)" : "REJECTED (limits/active/EEPROM)");
 }
 
 static void cmd_sf_retreat(int argc, char *argv[])
 {
     MissionTaskName task;
+    MissionTaskConfig config;
+    MotionPositionSnapshot pose;
     (void)argc;
     if (shell_allow_standalone_subflow() == 0U) return;
     if (shell_parse_task(argv[1], &task) == 0U) {
         printf("Usage: sf_retreat <task>\r\n");
         return;
     }
+    MissionTask_GetConfig(task, &config);
+    pose.x_pulses = config.safe_pose.x_pulses;
+    pose.y_pulses = config.safe_pose.y_pulses;
+    pose.z_pulses = config.safe_pose.z_pulses;
+    pose.capture_tick = HAL_GetTick();
     printf("[P6] SafeRetreat start: %s\r\n",
-           MissionSubflow_StartSafeRetreat(task, HAL_GetTick()) ?
-           "OK" : "REJECTED (safe pose or current XYZ invalid)");
+           MissionSubflow_StartSafeRetreat(task, &pose, HAL_GetTick()) ?
+           "OK" : "REJECTED (configured pose or current XYZ invalid)");
 }
 
 static void cmd_mission_start(int argc, char *argv[])
@@ -1693,6 +1709,7 @@ static void cmd_mission_status(int argc, char *argv[])
            (unsigned long)status.completed_count,
            (unsigned long)status.failed_count);
     printf("[P7] subflow=%s/%s attempt=%u/%u z_recovery=%u/%u "
+           "restart=%u/%u "
            "measured=%u mm step=%ld "
            "config=%s align=%u target=(%d,%d) "
            "blind=%u stop=%u ppm=%lu dir=%d\r\n",
@@ -1702,6 +1719,8 @@ static void cmd_mission_status(int argc, char *argv[])
            (unsigned int)status.subflow_max_attempts,
            (unsigned int)status.axis_recoveries,
            (unsigned int)status.max_axis_recoveries,
+           (unsigned int)status.restart_count,
+           (unsigned int)status.max_restarts,
            (unsigned int)status.subflow_distance_mm,
            (long)status.subflow_requested_pulses,
            MissionSubflow_TaskString(config_task),
@@ -1712,15 +1731,22 @@ static void cmd_mission_status(int argc, char *argv[])
            (unsigned long)config.blind_pulses_per_mm,
            (int)config.blind_direction);
     printf("[P7] z enabled=%u configured=%u stop=%u max=%lu dir=%d "
-           "safe_pose=%u storage=%s generation=%lu\r\n",
+           "storage=%s generation=%lu\r\n",
            (unsigned int)config.z_enabled,
            (unsigned int)config.z_configured,
            (unsigned int)config.z_stop_mm,
            (unsigned long)config.z_max_pulses,
            (int)config.z_direction,
-           (unsigned int)MissionSubflow_HasSafePose(),
            MissionTask_StorageString(status.storage_state),
            (unsigned long)status.storage_generation);
+    printf("[P7] config=%s preset=(%ld,%ld,%ld) safe=(%ld,%ld,%ld)\r\n",
+           MissionSubflow_TaskString(config_task),
+           (long)config.preset_pose.x_pulses,
+           (long)config.preset_pose.y_pulses,
+           (long)config.preset_pose.z_pulses,
+           (long)config.safe_pose.x_pulses,
+           (long)config.safe_pose.y_pulses,
+           (long)config.safe_pose.z_pulses);
 }
 
 static void cmd_mission_abort(int argc, char *argv[])
@@ -1745,6 +1771,43 @@ static void cmd_mission_payload(int argc, char *argv[])
     printf("[P7] payload=%s: %s\r\n",
            MissionTask_PayloadString(payload),
            MissionTask_SetPayload(payload) ? "OK" : "REJECTED (active)");
+}
+
+static void cmd_mission_pose_set(int argc, char *argv[], uint8_t safe)
+{
+    MissionTaskName task;
+    int32_t x;
+    int32_t y;
+    int32_t z;
+    uint8_t result;
+    (void)argc;
+    if (shell_parse_task(argv[1], &task) == 0U) {
+        printf("Usage: mission_%s_set <task> <x> <y> <z>\r\n",
+               (safe != 0U) ? "safe" : "preset");
+        return;
+    }
+    x = (int32_t)strtol(argv[2], NULL, 0);
+    y = (int32_t)strtol(argv[3], NULL, 0);
+    z = (int32_t)strtol(argv[4], NULL, 0);
+    result = (safe != 0U) ?
+        MissionTask_SetSafePose(task, x, y, z) :
+        MissionTask_SetPresetPose(task, x, y, z);
+    printf("[P7] %s %s pose=(%ld,%ld,%ld): %s\r\n",
+           MissionSubflow_TaskString(task),
+           (safe != 0U) ? "safe" : "preset",
+           (long)x, (long)y, (long)z,
+           (result != 0U) ? "OK (persisted)" :
+           "REJECTED (limits/active/EEPROM)");
+}
+
+static void cmd_mission_preset_set(int argc, char *argv[])
+{
+    cmd_mission_pose_set(argc, argv, 0U);
+}
+
+static void cmd_mission_safe_set(int argc, char *argv[])
+{
+    cmd_mission_pose_set(argc, argv, 1U);
 }
 
 static void cmd_mission_align_set(int argc, char *argv[])
@@ -1773,7 +1836,7 @@ static void cmd_mission_blind_set(int argc, char *argv[])
     long direction = strtol(argv[4], NULL, 0);
     (void)argc;
     if ((shell_parse_task(argv[1], &task) == 0U) ||
-        (stop_mm > UINT16_MAX) || (ppm == 0U) || (ppm > UINT32_MAX) ||
+        (stop_mm > UINT16_MAX) || (ppm == 0U) || (ppm > 0xFFFFFFUL) ||
         ((direction != -1) && (direction != 1))) {
         printf("Usage: mission_blind_set <task> <stop_mm> "
                "<pulses_per_mm> <-1|1>\r\n");
@@ -1806,7 +1869,7 @@ static void cmd_mission_z_set(int argc, char *argv[])
     max_pulses = strtoul(argv[3], NULL, 0);
     direction = strtol(argv[4], NULL, 0);
     if ((stop_mm > UINT16_MAX) || (max_pulses == 0U) ||
-        (max_pulses > INT32_MAX) ||
+        (max_pulses > 0xFFFFFFUL) ||
         ((direction != -1) && (direction != 1))) goto usage;
     printf("[P7] %s Z drop config: %s\r\n",
            MissionSubflow_TaskString(task),

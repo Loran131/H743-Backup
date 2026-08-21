@@ -26,8 +26,6 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
-#include "lwip/sockets.h"
-#include "lwip/inet.h"
 #include "c552.h"
 #include "fdcan.h"
 #include "iwdg.h"
@@ -35,8 +33,10 @@
 #include "motion_coordinator.h"
 #include "mission_subflow.h"
 #include "mission_task.h"
+#include "remote_control.h"
 #include "shell.h"
 #include "smd.h"
+#include "tcp_control_server.h"
 #include "usart.h"
 #include "vision_calibration.h"
 #include "xy_motor.h"
@@ -45,7 +45,6 @@
 #include "z_axis.h"
 #include "xz_vision_calibration.h"
 #include "xz_vision_align.h"
-#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -60,9 +59,6 @@
 /* USER CODE BEGIN PD */
 
 #define LWIP_READY_FLAG          (1U)
-#define TCP_CONTROL_SERVER_PORT  (5000U)
-#define TCP_RX_BUFFER_SIZE       (128U)
-#define TCP_COMMAND_SIZE         (64U)
 #define HEALTH_TASK_COUNT        (3U)
 #define HEALTH_DEFAULT_TASK      (0U)
 #define HEALTH_LEGACY_IO_TASK    (1U)
@@ -102,7 +98,7 @@ const osThreadAttr_t SocketTask_attributes = {
 osThreadId_t legacyIoTaskHandle;
 const osThreadAttr_t legacyIoTask_attributes = {
   .name = "LegacyIoTask",
-  .stack_size = 1536,
+  .stack_size = 2048,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
 osThreadId_t shellTaskHandle;
@@ -121,11 +117,6 @@ const osThreadAttr_t monitorTask_attributes = {
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
 
-static void TcpControlServer(void);
-static int TcpSendAll(int socket_fd, const uint8_t *data, size_t length);
-static void TcpProcessCommand(int socket_fd, char *command);
-static void BoardLedSet(uint8_t led_number, GPIO_PinState state);
-static GPIO_PinState BoardLedGet(uint8_t led_number);
 static void StartLegacyIoTask(void *argument);
 static void StartShellTask(void *argument);
 static void StartMonitorTask(void *argument);
@@ -196,6 +187,7 @@ void MX_FREERTOS_Init(void) {
   MotionCoordinator_Init(HAL_GetTick());
   MissionSubflow_Init(HAL_GetTick());
   MissionTask_Init(HAL_GetTick());
+  RemoteControl_Init();
 
   /* USER CODE END Init */
 
@@ -285,7 +277,7 @@ void StartTask02(void *argument)
     Error_Handler();
   }
 
-  TcpControlServer();
+  TcpControlServer_Run();
 
   /* Infinite loop */
   for(;;)
@@ -312,6 +304,7 @@ static void StartLegacyIoTask(void *argument)
 
     if (osMutexAcquire(canAccessMutexHandle, 0U) == osOK)
     {
+      RemoteControl_Poll(HAL_GetTick());
       ZAxis_Poll(HAL_GetTick());
       XZCalibration_Poll(HAL_GetTick());
       can_rx_timeout_check();
@@ -405,221 +398,6 @@ static uint8_t CriticalTasksHealthy(uint32_t now)
     }
   }
   return 1U;
-}
-
-static void TcpControlServer(void)
-{
-  int listen_fd;
-  int client_fd;
-  int reuse_addr;
-  struct sockaddr_in address;
-
-  for (;;)
-  {
-    listen_fd = lwip_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listen_fd < 0)
-    {
-      osDelay(1000U);
-      continue;
-    }
-
-    reuse_addr = 1;
-    (void)lwip_setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR,
-                          &reuse_addr, sizeof(reuse_addr));
-
-    memset(&address, 0, sizeof(address));
-    address.sin_family = AF_INET;
-    address.sin_port = PP_HTONS(TCP_CONTROL_SERVER_PORT);
-    address.sin_addr.s_addr = PP_HTONL(INADDR_ANY);
-
-    if ((lwip_bind(listen_fd, (const struct sockaddr *)&address,
-                   sizeof(address)) != 0) ||
-        (lwip_listen(listen_fd, 2) != 0))
-    {
-      (void)lwip_close(listen_fd);
-      osDelay(1000U);
-      continue;
-    }
-
-    for (;;)
-    {
-      client_fd = lwip_accept(listen_fd, NULL, NULL);
-      if (client_fd < 0)
-      {
-        break;
-      }
-
-      {
-        uint8_t buffer[TCP_RX_BUFFER_SIZE];
-        char command[TCP_COMMAND_SIZE];
-        size_t command_length = 0U;
-
-        (void)TcpSendAll(client_fd,
-                         (const uint8_t *)"STM32 LED control ready\r\n",
-                         sizeof("STM32 LED control ready\r\n") - 1U);
-
-        for (;;)
-        {
-          int received = lwip_recv(client_fd, buffer, sizeof(buffer), 0);
-
-          if (received <= 0)
-          {
-            break;
-          }
-
-          for (int i = 0; i < received; ++i)
-          {
-            if (buffer[i] == '\r')
-            {
-              continue;
-            }
-
-            if (buffer[i] == '\n')
-            {
-              command[command_length] = '\0';
-              TcpProcessCommand(client_fd, command);
-              command_length = 0U;
-              continue;
-            }
-
-            if (command_length < (sizeof(command) - 1U))
-            {
-              command[command_length++] = (char)buffer[i];
-            }
-            else
-            {
-              command_length = 0U;
-              (void)TcpSendAll(client_fd,
-                               (const uint8_t *)"ERR command too long\r\n",
-                               sizeof("ERR command too long\r\n") - 1U);
-            }
-          }
-        }
-      }
-
-      (void)lwip_close(client_fd);
-    }
-
-    (void)lwip_close(listen_fd);
-    osDelay(100U);
-  }
-}
-
-static int TcpSendAll(int socket_fd, const uint8_t *data, size_t length)
-{
-  size_t sent_total = 0U;
-
-  while (sent_total < length)
-  {
-    int sent = lwip_send(socket_fd, &data[sent_total],
-                         length - sent_total, 0);
-    if (sent <= 0)
-    {
-      return -1;
-    }
-    sent_total += (size_t)sent;
-  }
-
-  return 0;
-}
-
-static void TcpProcessCommand(int socket_fd, char *command)
-{
-  char response[80];
-  char *begin = command;
-  char *end;
-  uint8_t led_number = 1U;
-  GPIO_PinState led_state;
-
-  while (isspace((unsigned char)*begin) != 0)
-  {
-    ++begin;
-  }
-
-  end = begin + strlen(begin);
-  while ((end > begin) && (isspace((unsigned char)end[-1]) != 0))
-  {
-    *--end = '\0';
-  }
-
-  for (char *p = begin; *p != '\0'; ++p)
-  {
-    *p = (char)toupper((unsigned char)*p);
-  }
-
-  if (strcmp(begin, "STATUS") == 0)
-  {
-    (void)snprintf(response, sizeof(response),
-                   "LED1=%s LED2=%s LED3=%s\r\n",
-                   (BoardLedGet(1U) == GPIO_PIN_RESET) ? "ON" : "OFF",
-                   (BoardLedGet(2U) == GPIO_PIN_RESET) ? "ON" : "OFF",
-                   (BoardLedGet(3U) == GPIO_PIN_RESET) ? "ON" : "OFF");
-  }
-  else if ((strcmp(begin, "LED ON") == 0) ||
-           (strcmp(begin, "LED1 ON") == 0))
-  {
-    BoardLedSet(led_number, GPIO_PIN_RESET);
-    (void)snprintf(response, sizeof(response), "OK LED%u=ON\r\n", led_number);
-  }
-  else if ((strcmp(begin, "LED OFF") == 0) ||
-           (strcmp(begin, "LED1 OFF") == 0))
-  {
-    BoardLedSet(led_number, GPIO_PIN_SET);
-    (void)snprintf(response, sizeof(response), "OK LED%u=OFF\r\n", led_number);
-  }
-  else if ((strcmp(begin, "LED2 ON") == 0) || (strcmp(begin, "LED3 ON") == 0) ||
-           (strcmp(begin, "LED2 OFF") == 0) || (strcmp(begin, "LED3 OFF") == 0))
-  {
-    led_number = (uint8_t)(begin[3] - '0');
-    led_state = (strstr(begin, " ON") != NULL) ? GPIO_PIN_RESET : GPIO_PIN_SET;
-    BoardLedSet(led_number, led_state);
-    (void)snprintf(response, sizeof(response), "OK LED%u=%s\r\n", led_number,
-                   (led_state == GPIO_PIN_RESET) ? "ON" : "OFF");
-  }
-  else if (strcmp(begin, "HELP") == 0)
-  {
-    (void)snprintf(response, sizeof(response),
-                   "Commands: LED ON|OFF, LED1|2|3 ON|OFF, STATUS\r\n");
-  }
-  else
-  {
-    (void)snprintf(response, sizeof(response), "ERR unknown command\r\n");
-  }
-
-  (void)TcpSendAll(socket_fd, (const uint8_t *)response, strlen(response));
-}
-
-static void BoardLedSet(uint8_t led_number, GPIO_PinState state)
-{
-  switch (led_number)
-  {
-    case 1U:
-      HAL_GPIO_WritePin(LED1_GPIO_Port, LED1_Pin, state);
-      break;
-    case 2U:
-      HAL_GPIO_WritePin(LED2_GPIO_Port, LED2_Pin, state);
-      break;
-    case 3U:
-      HAL_GPIO_WritePin(LED3_GPIO_Port, LED3_Pin, state);
-      break;
-    default:
-      break;
-  }
-}
-
-static GPIO_PinState BoardLedGet(uint8_t led_number)
-{
-  switch (led_number)
-  {
-    case 1U:
-      return HAL_GPIO_ReadPin(LED1_GPIO_Port, LED1_Pin);
-    case 2U:
-      return HAL_GPIO_ReadPin(LED2_GPIO_Port, LED2_Pin);
-    case 3U:
-      return HAL_GPIO_ReadPin(LED3_GPIO_Port, LED3_Pin);
-    default:
-      return GPIO_PIN_SET;
-  }
 }
 
 /* USER CODE END Application */

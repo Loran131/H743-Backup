@@ -58,6 +58,7 @@ set(MX_Application_Src
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/xy_vision_align.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/motion_interfaces.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/motion_coordinator.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/remote_control.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/mission_subflow.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/mission_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/z_axis_link.c
@@ -65,6 +66,7 @@ set(MX_Application_Src
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/xz_vision_calibration.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/xz_vision_align.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/shell.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/tcp_control_server.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/eeprom.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/led.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../App/Src/systick.c

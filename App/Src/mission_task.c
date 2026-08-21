@@ -3,6 +3,8 @@
 #include "c552.h"
 #include "eeprom.h"
 #include "motion_coordinator.h"
+#include "xy_motor.h"
+#include "z_axis.h"
 #include <limits.h>
 #include <string.h>
 
@@ -14,16 +16,30 @@
 #define MISSION_Z_TIMEOUT_MS         260000U
 #define MISSION_GRIP_TIMEOUT_MS      15000U
 #define MISSION_POSE_TIMEOUT_MS      240000U
-#define MISSION_PRESET_X_PULSES      1012000L
-#define MISSION_PRESET_Y_PULSES      0L
-#define MISSION_PRESET_Z_PULSES      187600L
+#define MISSION_RECOVERY_IDLE_MS     5000U
+#define MISSION_MAX_RESTARTS         10U
+#define MISSION_DEFAULT_PRESET_X     1012000L
+#define MISSION_DEFAULT_PRESET_Y     0L
+#define MISSION_DEFAULT_PRESET_Z     187600L
+#define MISSION_DEFAULT_SAFE_X       1012000L
+#define MISSION_DEFAULT_SAFE_Y       0L
+#define MISSION_DEFAULT_SAFE_Z       0L
 #define MISSION_STORAGE_ADDRESS      128U
 #define MISSION_STORAGE_MAGIC        0x37474643UL
-#define MISSION_STORAGE_VERSION      1U
-#define MISSION_STORAGE_LENGTH       112U
-#define MISSION_STORAGE_CONFIG_OFFSET 28U
-#define MISSION_STORAGE_CONFIG_SIZE  20U
-#define MISSION_STORAGE_CRC_OFFSET   108U
+#define MISSION_STORAGE_VERSION      2U
+#define MISSION_STORAGE_LENGTH       128U
+#define MISSION_STORAGE_POSE_OFFSET  7U
+#define MISSION_STORAGE_POSE_SIZE    18U
+#define MISSION_STORAGE_CONFIG_OFFSET 79U
+#define MISSION_STORAGE_CONFIG_BYTES 45U
+#define MISSION_STORAGE_CRC_OFFSET   124U
+
+#define MISSION_STORAGE_V1_VERSION   1U
+#define MISSION_STORAGE_V1_LENGTH    112U
+#define MISSION_STORAGE_V1_CONFIG_OFFSET 28U
+#define MISSION_STORAGE_V1_CONFIG_SIZE 20U
+#define MISSION_STORAGE_V1_CRC_OFFSET 108U
+#define MISSION_UINT24_MAX           0xFFFFFFUL
 
 #define MISSION_CONFIG_ALIGN         0x01U
 #define MISSION_CONFIG_BLIND         0x02U
@@ -33,6 +49,15 @@
 #if (MISSION_STORAGE_ADDRESS + MISSION_STORAGE_LENGTH) > EEPROM_SIZE
 #error "P7 mission storage exceeds EEPROM capacity"
 #endif
+#if (MISSION_STORAGE_CONFIG_OFFSET + MISSION_STORAGE_CONFIG_BYTES) != \
+    MISSION_STORAGE_CRC_OFFSET
+#error "P7 mission config storage layout is inconsistent"
+#endif
+
+_Static_assert((MISSION_STORAGE_POSE_OFFSET +
+                MISSION_TASK_COUNT * MISSION_STORAGE_POSE_SIZE) ==
+               MISSION_STORAGE_CONFIG_OFFSET,
+               "P7 mission pose storage layout is inconsistent");
 
 typedef struct {
     MissionTaskStatus status;
@@ -71,6 +96,19 @@ static uint32_t storage_read_u32(const uint8_t *data)
            ((uint32_t)data[2] << 16U) | ((uint32_t)data[3] << 24U);
 }
 
+static void storage_write_u24(uint8_t *data, uint32_t value)
+{
+    data[0] = (uint8_t)value;
+    data[1] = (uint8_t)(value >> 8U);
+    data[2] = (uint8_t)(value >> 16U);
+}
+
+static uint32_t storage_read_u24(const uint8_t *data)
+{
+    return (uint32_t)data[0] | ((uint32_t)data[1] << 8U) |
+           ((uint32_t)data[2] << 16U);
+}
+
 static uint32_t storage_crc32(const uint8_t *data, uint16_t length)
 {
     uint32_t crc = 0xFFFFFFFFUL;
@@ -83,6 +121,32 @@ static uint32_t storage_crc32(const uint8_t *data, uint16_t length)
     return crc ^ 0xFFFFFFFFUL;
 }
 
+static void set_default_poses(MissionTaskConfig *config)
+{
+    config->preset_pose.x_pulses = MISSION_DEFAULT_PRESET_X;
+    config->preset_pose.y_pulses = MISSION_DEFAULT_PRESET_Y;
+    config->preset_pose.z_pulses = MISSION_DEFAULT_PRESET_Z;
+    config->safe_pose.x_pulses = MISSION_DEFAULT_SAFE_X;
+    config->safe_pose.y_pulses = MISSION_DEFAULT_SAFE_Y;
+    config->safe_pose.z_pulses = MISSION_DEFAULT_SAFE_Z;
+}
+
+static uint8_t pose_sane(const MissionTaskPose *pose)
+{
+    const XY_AxisConfig *x = XY_GetConfig(XY_AXIS_X);
+    const XY_AxisConfig *y = XY_GetConfig(XY_AXIS_Y);
+    return ((pose != NULL) && (x != NULL) && (y != NULL) &&
+            (pose->x_pulses >= x->soft_min_pulses) &&
+            (pose->x_pulses <= x->soft_max_pulses) &&
+            (pose->y_pulses >= y->soft_min_pulses) &&
+            (pose->y_pulses <= y->soft_max_pulses) &&
+            (pose->z_pulses >= Z_AXIS_SOFT_MIN_PULSES) &&
+            (pose->z_pulses <= Z_AXIS_SOFT_MAX_PULSES) &&
+            ((uint32_t)pose->x_pulses <= MISSION_UINT24_MAX) &&
+            ((uint32_t)pose->y_pulses <= MISSION_UINT24_MAX) &&
+            ((uint32_t)pose->z_pulses <= MISSION_UINT24_MAX)) ? 1U : 0U;
+}
+
 static uint8_t config_sane(MissionTaskName task,
                            const MissionTaskConfig *config)
 {
@@ -92,6 +156,7 @@ static uint8_t config_sane(MissionTaskName task,
     if (config->blind_configured != 0U) {
         if ((task == MISSION_TASK_FRAME_PUT) ||
             (config->blind_pulses_per_mm == 0U) ||
+            (config->blind_pulses_per_mm > MISSION_UINT24_MAX) ||
             ((config->blind_direction != -1) &&
              (config->blind_direction != 1))) return 0U;
     }
@@ -101,22 +166,24 @@ static uint8_t config_sane(MissionTaskName task,
     }
     if (config->z_configured != 0U) {
         if ((config->z_max_pulses == 0U) ||
-            (config->z_max_pulses > INT32_MAX) ||
+            (config->z_max_pulses > MISSION_UINT24_MAX) ||
             ((config->z_direction != -1) &&
              (config->z_direction != 1))) return 0U;
     }
     if ((task == MISSION_TASK_FRAME_PUT) &&
         (config->z_configured != 0U) &&
         (config->z_enabled == 0U)) return 0U;
-    return 1U;
+    return ((pose_sane(&config->preset_pose) != 0U) &&
+            (pose_sane(&config->safe_pose) != 0U)) ? 1U : 0U;
 }
 
 static uint8_t load_configuration(uint32_t now)
 {
     uint8_t record[MISSION_STORAGE_LENGTH];
     MissionTaskConfig loaded[MISSION_TASK_COUNT];
-    MotionPositionSnapshot safe_pose;
-    uint8_t safe_valid;
+    uint8_t version;
+
+    (void)now;
 
     if (EEPROM_Read(MISSION_STORAGE_ADDRESS, record, sizeof(record)) != HAL_OK) {
         g_task.status.storage_state = MISSION_STORAGE_IO_ERROR;
@@ -126,62 +193,121 @@ static uint8_t load_configuration(uint32_t now)
         g_task.status.storage_state = MISSION_STORAGE_EMPTY;
         return 0U;
     }
-    if ((storage_read_u16(&record[4]) != MISSION_STORAGE_VERSION) ||
-        (storage_read_u16(&record[6]) != MISSION_STORAGE_LENGTH) ||
-        (record[12] != MISSION_TASK_COUNT) ||
-        (storage_read_u32(&record[MISSION_STORAGE_CRC_OFFSET]) !=
-         storage_crc32(&record[4], MISSION_STORAGE_CRC_OFFSET - 4U))) {
-        g_task.status.storage_state = MISSION_STORAGE_INVALID;
-        return 0U;
-    }
 
     memset(loaded, 0, sizeof(loaded));
-    for (uint8_t task = 0U; task < MISSION_TASK_COUNT; ++task) {
-        const uint8_t *source = &record[MISSION_STORAGE_CONFIG_OFFSET +
-                                        task * MISSION_STORAGE_CONFIG_SIZE];
-        uint8_t flags = source[6];
-        loaded[task].target_x = (int16_t)storage_read_u16(&source[0]);
-        loaded[task].target_y = (int16_t)storage_read_u16(&source[2]);
-        loaded[task].blind_stop_mm = storage_read_u16(&source[4]);
-        loaded[task].blind_direction = (int8_t)source[7];
-        loaded[task].blind_pulses_per_mm = storage_read_u32(&source[8]);
-        loaded[task].z_stop_mm = storage_read_u16(&source[12]);
-        loaded[task].z_direction = (int8_t)source[14];
-        loaded[task].z_max_pulses = storage_read_u32(&source[16]);
-        loaded[task].align_configured =
-            ((flags & MISSION_CONFIG_ALIGN) != 0U) ? 1U : 0U;
-        loaded[task].blind_configured =
-            ((flags & MISSION_CONFIG_BLIND) != 0U) ? 1U : 0U;
-        loaded[task].z_enabled =
-            ((flags & MISSION_CONFIG_Z_ENABLED) != 0U) ? 1U : 0U;
-        loaded[task].z_configured =
-            ((flags & MISSION_CONFIG_Z_CONFIGURED) != 0U) ? 1U : 0U;
-        if (((flags & 0xF0U) != 0U) ||
-            (config_sane((MissionTaskName)task, &loaded[task]) == 0U)) {
+    for (uint8_t task = 0U; task < MISSION_TASK_COUNT; ++task)
+        set_default_poses(&loaded[task]);
+
+    version = record[4];
+    if (version == MISSION_STORAGE_VERSION) {
+        uint16_t offset = MISSION_STORAGE_CONFIG_OFFSET;
+        if (storage_read_u32(&record[MISSION_STORAGE_CRC_OFFSET]) !=
+            storage_crc32(&record[4], MISSION_STORAGE_CRC_OFFSET - 4U)) {
             g_task.status.storage_state = MISSION_STORAGE_INVALID;
             return 0U;
         }
-    }
 
-    safe_valid = record[13];
-    if (safe_valid > 1U) {
+        for (uint8_t task = 0U; task < MISSION_TASK_COUNT; ++task) {
+            const uint8_t *source = &record[MISSION_STORAGE_POSE_OFFSET +
+                task * MISSION_STORAGE_POSE_SIZE];
+            loaded[task].preset_pose.x_pulses =
+                (int32_t)storage_read_u24(&source[0]);
+            loaded[task].preset_pose.y_pulses =
+                (int32_t)storage_read_u24(&source[3]);
+            loaded[task].preset_pose.z_pulses =
+                (int32_t)storage_read_u24(&source[6]);
+            loaded[task].safe_pose.x_pulses =
+                (int32_t)storage_read_u24(&source[9]);
+            loaded[task].safe_pose.y_pulses =
+                (int32_t)storage_read_u24(&source[12]);
+            loaded[task].safe_pose.z_pulses =
+                (int32_t)storage_read_u24(&source[15]);
+        }
+
+        for (uint8_t task = 0U; task < MISSION_TASK_COUNT; ++task) {
+            const uint8_t *source = &record[offset];
+            uint8_t flags;
+            loaded[task].target_x = (int16_t)storage_read_u16(&source[0]);
+            loaded[task].target_y = (int16_t)storage_read_u16(&source[2]);
+            if (task != MISSION_TASK_FRAME_PUT) {
+                loaded[task].blind_stop_mm = storage_read_u16(&source[4]);
+                loaded[task].blind_pulses_per_mm = storage_read_u24(&source[6]);
+                flags = source[9];
+                offset += 10U;
+            } else {
+                loaded[task].z_stop_mm = storage_read_u16(&source[4]);
+                loaded[task].z_max_pulses = storage_read_u24(&source[6]);
+                flags = source[9];
+                offset += 10U;
+            }
+            if (task == MISSION_TASK_TAG_PUT) {
+                loaded[task].z_stop_mm = storage_read_u16(&source[10]);
+                loaded[task].z_max_pulses = storage_read_u24(&source[12]);
+                offset += 5U;
+            }
+            if ((flags & 0xC0U) != 0U) {
+                g_task.status.storage_state = MISSION_STORAGE_INVALID;
+                return 0U;
+            }
+            loaded[task].align_configured =
+                ((flags & MISSION_CONFIG_ALIGN) != 0U) ? 1U : 0U;
+            loaded[task].blind_configured =
+                ((flags & MISSION_CONFIG_BLIND) != 0U) ? 1U : 0U;
+            loaded[task].z_enabled =
+                ((flags & MISSION_CONFIG_Z_ENABLED) != 0U) ? 1U : 0U;
+            loaded[task].z_configured =
+                ((flags & MISSION_CONFIG_Z_CONFIGURED) != 0U) ? 1U : 0U;
+            loaded[task].blind_direction =
+                ((flags & 0x10U) != 0U) ? -1 : 1;
+            loaded[task].z_direction =
+                ((flags & 0x20U) != 0U) ? -1 : 1;
+        }
+        g_task.status.storage_generation = storage_read_u16(&record[5]);
+    } else if ((storage_read_u16(&record[4]) ==
+                MISSION_STORAGE_V1_VERSION) &&
+               (storage_read_u16(&record[6]) ==
+                MISSION_STORAGE_V1_LENGTH) &&
+               (record[12] == MISSION_TASK_COUNT) &&
+               (storage_read_u32(&record[MISSION_STORAGE_V1_CRC_OFFSET]) ==
+                storage_crc32(&record[4],
+                    MISSION_STORAGE_V1_CRC_OFFSET - 4U))) {
+        for (uint8_t task = 0U; task < MISSION_TASK_COUNT; ++task) {
+            const uint8_t *source = &record[MISSION_STORAGE_V1_CONFIG_OFFSET +
+                task * MISSION_STORAGE_V1_CONFIG_SIZE];
+            uint8_t flags = source[6];
+            loaded[task].target_x = (int16_t)storage_read_u16(&source[0]);
+            loaded[task].target_y = (int16_t)storage_read_u16(&source[2]);
+            loaded[task].blind_stop_mm = storage_read_u16(&source[4]);
+            loaded[task].blind_direction = (int8_t)source[7];
+            loaded[task].blind_pulses_per_mm = storage_read_u32(&source[8]);
+            loaded[task].z_stop_mm = storage_read_u16(&source[12]);
+            loaded[task].z_direction = (int8_t)source[14];
+            loaded[task].z_max_pulses = storage_read_u32(&source[16]);
+            loaded[task].align_configured =
+                ((flags & MISSION_CONFIG_ALIGN) != 0U) ? 1U : 0U;
+            loaded[task].blind_configured =
+                ((flags & MISSION_CONFIG_BLIND) != 0U) ? 1U : 0U;
+            loaded[task].z_enabled =
+                ((flags & MISSION_CONFIG_Z_ENABLED) != 0U) ? 1U : 0U;
+            loaded[task].z_configured =
+                ((flags & MISSION_CONFIG_Z_CONFIGURED) != 0U) ? 1U : 0U;
+        }
+        g_task.status.storage_generation = storage_read_u32(&record[8]);
+    } else {
         g_task.status.storage_state = MISSION_STORAGE_INVALID;
         return 0U;
     }
-    if (safe_valid != 0U) {
-        safe_pose.x_pulses = (int32_t)storage_read_u32(&record[16]);
-        safe_pose.y_pulses = (int32_t)storage_read_u32(&record[20]);
-        safe_pose.z_pulses = (int32_t)storage_read_u32(&record[24]);
-        safe_pose.capture_tick = now;
-        if (MissionSubflow_SetSafePose(&safe_pose) == 0U) {
+
+    for (uint8_t task = 0U; task < MISSION_TASK_COUNT; ++task) {
+        if (config_sane((MissionTaskName)task, &loaded[task]) == 0U) {
             g_task.status.storage_state = MISSION_STORAGE_INVALID;
             return 0U;
         }
     }
-
     memcpy(g_task.configs, loaded, sizeof(loaded));
-    g_task.status.storage_generation = storage_read_u32(&record[8]);
     g_task.status.storage_state = MISSION_STORAGE_VALID;
+    if (version != MISSION_STORAGE_VERSION)
+        return MissionTask_SaveConfiguration();
     return 1U;
 }
 
@@ -214,7 +340,7 @@ static void finish_complete(uint32_t now)
     release_mission(now);
 }
 
-static void finish_fault(MissionFailure failure, uint32_t now)
+static void finish_terminal_fault(MissionFailure failure, uint32_t now)
 {
     if (MissionSubflow_IsActive() != 0U)
         MissionSubflow_AbortAll(failure, now);
@@ -222,6 +348,40 @@ static void finish_fault(MissionFailure failure, uint32_t now)
     ++g_task.status.failed_count;
     enter_state(MISSION_STATE_FAULT, now);
     release_mission(now);
+}
+
+static uint8_t fault_retryable(MissionFailure failure)
+{
+    MotionCoordinatorStatus coordinator;
+    if ((g_task.status.restart_count >= g_task.status.max_restarts) ||
+        (failure.reason == MISSION_FAIL_BUSY) ||
+        (failure.reason == MISSION_FAIL_INVALID_ARGUMENT) ||
+        (failure.reason == MISSION_FAIL_POSITION_INVALID) ||
+        (failure.reason == MISSION_FAIL_SOFT_LIMIT) ||
+        (failure.reason == MISSION_FAIL_CANCELLED) ||
+        (g_task.status.state == MISSION_STATE_PRECHECK) ||
+        (g_task.status.state == MISSION_STATE_PRECHECK_HELD) ||
+        (g_task.status.state == MISSION_STATE_VERIFY) ||
+        (((g_task.status.task == MISSION_TASK_TAG_PUT) ||
+          (g_task.status.task == MISSION_TASK_FRAME_PUT)) &&
+         (g_task.status.payload != MISSION_PAYLOAD_HELD))) return 0U;
+    MotionCoordinator_GetStatus(&coordinator);
+    return ((coordinator.owner == MOTION_OWNER_MISSION) &&
+            (coordinator.latch_reason == MOTION_LATCH_NONE) &&
+            (coordinator.gripper_frozen == 0U)) ? 1U : 0U;
+}
+
+static void handle_fault(MissionFailure failure, uint32_t now)
+{
+    if (fault_retryable(failure) == 0U) {
+        finish_terminal_fault(failure, now);
+        return;
+    }
+    if (MissionSubflow_IsActive() != 0U)
+        MissionSubflow_AbortAll(failure, now);
+    g_task.status.failure = failure;
+    ++g_task.status.restart_count;
+    enter_state(MISSION_STATE_RECOVERY_WAIT_IDLE, now);
 }
 
 static uint8_t config_valid(MissionTaskName task, int32_t *detail)
@@ -236,9 +396,8 @@ static uint8_t config_valid(MissionTaskName task, int32_t *detail)
     if ((task == MISSION_TASK_TAG_PUT) &&
         (config->z_enabled != 0U) &&
         (config->z_configured == 0U)) missing |= 4;
-    if (((task == MISSION_TASK_TAG_PUT) ||
-         (task == MISSION_TASK_FRAME_PUT)) &&
-        (MissionSubflow_HasSafePose() == 0U)) missing |= 8;
+    if ((pose_sane(&config->preset_pose) == 0U) ||
+        (pose_sane(&config->safe_pose) == 0U)) missing |= 8;
     *detail = missing;
     return (missing == 0) ? 1U : 0U;
 }
@@ -254,13 +413,13 @@ static void poll_precheck(uint32_t now)
         MissionFailure failure = {MISSION_FAIL_SOURCE_COORDINATOR,
                                   MISSION_FAIL_REJECTED,
                                   (int32_t)coordinator.latch_reason};
-        finish_fault(failure, now);
+        handle_fault(failure, now);
         return;
     }
     if (config_valid(g_task.status.task, &detail) == 0U) {
         MissionFailure failure = {MISSION_FAIL_SOURCE_COORDINATOR,
                                   MISSION_FAIL_INVALID_ARGUMENT, detail};
-        finish_fault(failure, now);
+        handle_fault(failure, now);
         return;
     }
     if ((g_task.status.state == MISSION_STATE_PRECHECK_HELD) &&
@@ -268,21 +427,26 @@ static void poll_precheck(uint32_t now)
         MissionFailure failure = {MISSION_FAIL_SOURCE_GRIPPER,
                                   MISSION_FAIL_REJECTED,
                                   (int32_t)g_task.status.payload};
-        finish_fault(failure, now);
+        handle_fault(failure, now);
         return;
     }
     if (MotionCoordinator_CaptureSnapshot(&pose, 1U, now) == 0U) {
         MissionFailure failure = {MISSION_FAIL_SOURCE_POSE,
                                   MISSION_FAIL_POSITION_INVALID, 0};
-        finish_fault(failure, now);
+        handle_fault(failure, now);
         return;
     }
-    enter_state(MISSION_STATE_PRESET_POSE, now);
+    enter_state(((g_task.status.task == MISSION_TASK_RED_PICK) ||
+                 (g_task.status.task == MISSION_TASK_RED_FIND)) ?
+                MISSION_STATE_PREPARE_GRIP_OPEN :
+                MISSION_STATE_PRESET_POSE, now);
 }
 
 static MissionSubflowType expected_subflow(MissionTaskState state)
 {
     switch (state) {
+    case MISSION_STATE_PREPARE_GRIP_OPEN:
+        return MISSION_SUBFLOW_GRIP_OPEN;
     case MISSION_STATE_PRESET_POSE:
         return MISSION_SUBFLOW_PRESET_POSE;
     case MISSION_STATE_RED_OBSERVE:
@@ -310,6 +474,8 @@ static MissionSubflowType expected_subflow(MissionTaskState state)
         return MISSION_SUBFLOW_RETURN_POSE;
     case MISSION_STATE_SAFE_RETREAT:
         return MISSION_SUBFLOW_SAFE_RETREAT;
+    case MISSION_STATE_RECOVER_PRESET:
+        return MISSION_SUBFLOW_PRESET_POSE;
     default:
         return MISSION_SUBFLOW_NONE;
     }
@@ -318,6 +484,8 @@ static MissionSubflowType expected_subflow(MissionTaskState state)
 static uint32_t state_timeout(MissionTaskState state)
 {
     switch (state) {
+    case MISSION_STATE_PREPARE_GRIP_OPEN:
+        return MISSION_GRIP_TIMEOUT_MS;
     case MISSION_STATE_PRESET_POSE:
         return MISSION_POSE_TIMEOUT_MS;
     case MISSION_STATE_RED_OBSERVE:
@@ -338,6 +506,7 @@ static uint32_t state_timeout(MissionTaskState state)
     case MISSION_STATE_RECORD_XYZ:
     case MISSION_STATE_RETURN_RECORDED_POSE:
     case MISSION_STATE_SAFE_RETREAT:
+    case MISSION_STATE_RECOVER_PRESET:
         return MISSION_POSE_TIMEOUT_MS;
     default:
         return 1000U;
@@ -349,11 +518,14 @@ static uint8_t start_subflow(uint32_t now)
     MissionTaskName task = g_task.status.task;
     const MissionTaskConfig *config = &g_task.configs[task];
     switch (g_task.status.state) {
-    case MISSION_STATE_PRESET_POSE: {
+    case MISSION_STATE_PREPARE_GRIP_OPEN:
+        return MissionSubflow_StartGrip(task, 0U, now);
+    case MISSION_STATE_PRESET_POSE:
+    case MISSION_STATE_RECOVER_PRESET: {
         MotionPositionSnapshot pose = {
-            MISSION_PRESET_X_PULSES,
-            MISSION_PRESET_Y_PULSES,
-            MISSION_PRESET_Z_PULSES,
+            config->preset_pose.x_pulses,
+            config->preset_pose.y_pulses,
+            config->preset_pose.z_pulses,
             now
         };
         return MissionSubflow_StartPresetPose(task, &pose, now);
@@ -389,7 +561,15 @@ static uint8_t start_subflow(uint32_t now)
     case MISSION_STATE_RETURN_RECORDED_POSE:
         return MissionSubflow_StartReturnPose(task, now);
     case MISSION_STATE_SAFE_RETREAT:
-        return MissionSubflow_StartSafeRetreat(task, now);
+    {
+        MotionPositionSnapshot pose = {
+            config->safe_pose.x_pulses,
+            config->safe_pose.y_pulses,
+            config->safe_pose.z_pulses,
+            now
+        };
+        return MissionSubflow_StartSafeRetreat(task, &pose, now);
+    }
     default:
         return 0U;
     }
@@ -398,6 +578,10 @@ static uint8_t start_subflow(uint32_t now)
 static void advance_after_subflow(uint32_t now)
 {
     switch (g_task.status.state) {
+    case MISSION_STATE_PREPARE_GRIP_OPEN:
+        g_task.status.payload = MISSION_PAYLOAD_EMPTY;
+        enter_state(MISSION_STATE_PRESET_POSE, now);
+        break;
     case MISSION_STATE_PRESET_POSE:
         if ((g_task.status.task == MISSION_TASK_RED_PICK) ||
             (g_task.status.task == MISSION_TASK_RED_FIND))
@@ -446,11 +630,17 @@ static void advance_after_subflow(uint32_t now)
     case MISSION_STATE_SAFE_RETREAT:
         finish_complete(now);
         break;
+    case MISSION_STATE_RECOVER_PRESET:
+        enter_state(((g_task.status.task == MISSION_TASK_TAG_PUT) ||
+                     (g_task.status.task == MISSION_TASK_FRAME_PUT)) ?
+                    MISSION_STATE_PRECHECK_HELD : MISSION_STATE_PRECHECK,
+                    now);
+        break;
     default: {
         MissionFailure failure = {MISSION_FAIL_SOURCE_COORDINATOR,
                                   MISSION_FAIL_INVALID_ARGUMENT,
                                   (int32_t)g_task.status.state};
-        finish_fault(failure, now);
+        handle_fault(failure, now);
         break;
     }
     }
@@ -465,7 +655,7 @@ static void poll_subflow_state(uint32_t now)
             MissionFailure failure = {MISSION_FAIL_SOURCE_COORDINATOR,
                                       MISSION_FAIL_REJECTED,
                                       (int32_t)expected};
-            finish_fault(failure, now);
+            handle_fault(failure, now);
         } else {
             g_task.subflow_started = 1U;
         }
@@ -477,19 +667,19 @@ static void poll_subflow_state(uint32_t now)
         MissionFailure failure = {MISSION_FAIL_SOURCE_COORDINATOR,
                                   MISSION_FAIL_REJECTED,
                                   (int32_t)subflow.type};
-        finish_fault(failure, now);
+        handle_fault(failure, now);
         return;
     }
     if (subflow.state == MISSION_SUBFLOW_COMPLETE) {
         advance_after_subflow(now);
     } else if (subflow.state == MISSION_SUBFLOW_FAULT) {
-        finish_fault(subflow.failure, now);
+        handle_fault(subflow.failure, now);
     } else if ((uint32_t)(now - g_task.status.state_tick) >
                state_timeout(g_task.status.state)) {
         MissionFailure failure = {MISSION_FAIL_SOURCE_COORDINATOR,
                                   MISSION_FAIL_TIMEOUT,
                                   (int32_t)g_task.status.state};
-        finish_fault(failure, now);
+        handle_fault(failure, now);
     }
 }
 
@@ -539,6 +729,8 @@ static void process_start_request(uint32_t now)
     g_task.status.failure.reason = MISSION_FAIL_NONE;
     g_task.status.failure.detail = 0;
     g_task.status.start_tick = now;
+    g_task.status.restart_count = 0U;
+    g_task.status.max_restarts = MISSION_MAX_RESTARTS;
     g_task.cancel_issued = 0U;
     enter_state(((task == MISSION_TASK_TAG_PUT) ||
                  (task == MISSION_TASK_FRAME_PUT)) ?
@@ -548,9 +740,12 @@ static void process_start_request(uint32_t now)
 void MissionTask_Init(uint32_t now)
 {
     memset(&g_task, 0, sizeof(g_task));
+    for (uint8_t task = 0U; task < MISSION_TASK_COUNT; ++task)
+        set_default_poses(&g_task.configs[task]);
     g_task.status.task = MISSION_TASK_RED_PICK;
     g_task.status.state = MISSION_STATE_IDLE;
     g_task.status.payload = MISSION_PAYLOAD_EMPTY;
+    g_task.status.max_restarts = MISSION_MAX_RESTARTS;
     g_task.status.state_tick = now;
     g_start_request = 0U;
     g_requested_task = 0U;
@@ -582,7 +777,7 @@ void MissionTask_Poll(uint32_t now)
         if (MissionSubflow_IsActive() == 0U) {
             MissionFailure failure = {MISSION_FAIL_SOURCE_COORDINATOR,
                                       MISSION_FAIL_CANCELLED, 0};
-            finish_fault(failure, now);
+            finish_terminal_fault(failure, now);
         }
         return;
     }
@@ -593,7 +788,7 @@ void MissionTask_Poll(uint32_t now)
         MissionFailure failure = {MISSION_FAIL_SOURCE_COORDINATOR,
                                   MISSION_FAIL_CANCELLED,
                                   (int32_t)coordinator.latch_reason};
-        finish_fault(failure, now);
+        finish_terminal_fault(failure, now);
         return;
     }
     if ((uint32_t)(now - g_task.status.start_tick) >
@@ -601,7 +796,29 @@ void MissionTask_Poll(uint32_t now)
         MissionFailure failure = {MISSION_FAIL_SOURCE_COORDINATOR,
                                   MISSION_FAIL_TIMEOUT,
                                   (int32_t)g_task.status.state};
-        finish_fault(failure, now);
+        finish_terminal_fault(failure, now);
+        return;
+    }
+
+    if (g_task.status.state == MISSION_STATE_RECOVERY_WAIT_IDLE) {
+        XY_AxisStatus x;
+        XY_AxisStatus y;
+        ZAxisControlStatus z;
+        (void)XY_GetStatus(XY_AXIS_X, &x);
+        (void)XY_GetStatus(XY_AXIS_Y, &y);
+        ZAxis_GetControlStatus(&z);
+        if ((x.position_valid == 0U) || (y.position_valid == 0U) ||
+            (z.position_valid == 0U) || (x.state == XY_STATE_FAULT) ||
+            (y.state == XY_STATE_FAULT) || (z.state == Z_STATE_FAULT)) {
+            finish_terminal_fault(g_task.status.failure, now);
+        } else if ((x.state == XY_STATE_IDLE) &&
+                   (y.state == XY_STATE_IDLE) &&
+                   (z.state == Z_STATE_IDLE)) {
+            enter_state(MISSION_STATE_RECOVER_PRESET, now);
+        } else if ((uint32_t)(now - g_task.status.state_tick) >
+                   MISSION_RECOVERY_IDLE_MS) {
+            finish_terminal_fault(g_task.status.failure, now);
+        }
         return;
     }
 
@@ -641,13 +858,14 @@ void MissionTask_Poll(uint32_t now)
         break;
     case MISSION_STATE_VERIFY:
         if (g_task.status.payload == MISSION_PAYLOAD_HELD)
-            finish_complete(now);
+            enter_state(MISSION_STATE_SAFE_RETREAT, now);
         else {
             MissionFailure failure = {MISSION_FAIL_SOURCE_GRIPPER,
                                       MISSION_FAIL_REJECTED, 0};
-            finish_fault(failure, now);
+            handle_fault(failure, now);
         }
         break;
+    case MISSION_STATE_PREPARE_GRIP_OPEN:
     case MISSION_STATE_PRESET_POSE:
     case MISSION_STATE_RED_OBSERVE:
     case MISSION_STATE_TAG_OBSERVE:
@@ -661,13 +879,14 @@ void MissionTask_Poll(uint32_t now)
     case MISSION_STATE_GRIP_OPEN:
     case MISSION_STATE_RETURN_RECORDED_POSE:
     case MISSION_STATE_SAFE_RETREAT:
+    case MISSION_STATE_RECOVER_PRESET:
         poll_subflow_state(now);
         break;
     default: {
         MissionFailure failure = {MISSION_FAIL_SOURCE_COORDINATOR,
                                   MISSION_FAIL_INVALID_ARGUMENT,
                                   (int32_t)g_task.status.state};
-        finish_fault(failure, now);
+        handle_fault(failure, now);
         break;
     }
     }
@@ -717,6 +936,7 @@ uint8_t MissionTask_SetBlindY(MissionTaskName task, uint16_t stop_mm,
     if ((task >= MISSION_TASK_COUNT) ||
         (task == MISSION_TASK_FRAME_PUT) ||
         (pulses_per_mm == 0U) ||
+        (pulses_per_mm > MISSION_UINT24_MAX) ||
         ((direction != -1) && (direction != 1)) ||
         (MissionTask_IsActive() != 0U) ||
         (g_start_request != 0U)) return 0U;
@@ -751,7 +971,7 @@ uint8_t MissionTask_SetZDrop(MissionTaskName task, uint8_t enabled,
         }
         return 1U;
     }
-    if ((max_pulses == 0U) || (max_pulses > INT32_MAX) ||
+    if ((max_pulses == 0U) || (max_pulses > MISSION_UINT24_MAX) ||
         ((direction != -1) && (direction != 1))) return 0U;
     g_task.configs[task].z_stop_mm = stop_mm;
     g_task.configs[task].z_max_pulses = max_pulses;
@@ -763,6 +983,40 @@ uint8_t MissionTask_SetZDrop(MissionTaskName task, uint8_t enabled,
         return 0U;
     }
     return 1U;
+}
+
+static uint8_t set_task_pose(MissionTaskName task, MissionTaskPose *target,
+                             int32_t x_pulses, int32_t y_pulses,
+                             int32_t z_pulses)
+{
+    MissionTaskPose previous;
+    MissionTaskPose pose = {x_pulses, y_pulses, z_pulses};
+    if ((task >= MISSION_TASK_COUNT) || (target == NULL) ||
+        (pose_sane(&pose) == 0U) || (MissionTask_IsActive() != 0U) ||
+        (g_start_request != 0U)) return 0U;
+    previous = *target;
+    *target = pose;
+    if (MissionTask_SaveConfiguration() == 0U) {
+        *target = previous;
+        return 0U;
+    }
+    return 1U;
+}
+
+uint8_t MissionTask_SetPresetPose(MissionTaskName task, int32_t x_pulses,
+                                  int32_t y_pulses, int32_t z_pulses)
+{
+    if (task >= MISSION_TASK_COUNT) return 0U;
+    return set_task_pose(task, &g_task.configs[task].preset_pose,
+                         x_pulses, y_pulses, z_pulses);
+}
+
+uint8_t MissionTask_SetSafePose(MissionTaskName task, int32_t x_pulses,
+                                int32_t y_pulses, int32_t z_pulses)
+{
+    if (task >= MISSION_TASK_COUNT) return 0U;
+    return set_task_pose(task, &g_task.configs[task].safe_pose,
+                         x_pulses, y_pulses, z_pulses);
 }
 
 uint8_t MissionTask_SetPayload(MissionPayloadState payload)
@@ -777,9 +1031,11 @@ uint8_t MissionTask_SetPayload(MissionPayloadState payload)
 uint8_t MissionTask_SaveConfiguration(void)
 {
     uint8_t record[MISSION_STORAGE_LENGTH];
-    MotionPositionSnapshot safe_pose;
-    uint8_t safe_valid;
-    uint32_t generation = g_task.status.storage_generation + 1U;
+    uint16_t offset = MISSION_STORAGE_CONFIG_OFFSET;
+    uint16_t generation =
+        (uint16_t)(g_task.status.storage_generation + 1U);
+
+    if (generation == 0U) generation = 1U;
 
     for (uint8_t task = 0U; task < MISSION_TASK_COUNT; ++task) {
         if (config_sane((MissionTaskName)task, &g_task.configs[task]) == 0U)
@@ -787,37 +1043,57 @@ uint8_t MissionTask_SaveConfiguration(void)
     }
 
     memset(record, 0, sizeof(record));
-    storage_write_u16(&record[4], MISSION_STORAGE_VERSION);
-    storage_write_u16(&record[6], MISSION_STORAGE_LENGTH);
-    storage_write_u32(&record[8], generation);
-    record[12] = MISSION_TASK_COUNT;
-    safe_valid = MissionSubflow_GetSafePose(&safe_pose);
-    record[13] = safe_valid;
-    if (safe_valid != 0U) {
-        storage_write_u32(&record[16], (uint32_t)safe_pose.x_pulses);
-        storage_write_u32(&record[20], (uint32_t)safe_pose.y_pulses);
-        storage_write_u32(&record[24], (uint32_t)safe_pose.z_pulses);
+    record[4] = MISSION_STORAGE_VERSION;
+    storage_write_u16(&record[5], generation);
+
+    for (uint8_t task = 0U; task < MISSION_TASK_COUNT; ++task) {
+        const MissionTaskConfig *config = &g_task.configs[task];
+        uint8_t *target = &record[MISSION_STORAGE_POSE_OFFSET +
+                                  task * MISSION_STORAGE_POSE_SIZE];
+        storage_write_u24(&target[0],
+                          (uint32_t)config->preset_pose.x_pulses);
+        storage_write_u24(&target[3],
+                          (uint32_t)config->preset_pose.y_pulses);
+        storage_write_u24(&target[6],
+                          (uint32_t)config->preset_pose.z_pulses);
+        storage_write_u24(&target[9],
+                          (uint32_t)config->safe_pose.x_pulses);
+        storage_write_u24(&target[12],
+                          (uint32_t)config->safe_pose.y_pulses);
+        storage_write_u24(&target[15],
+                          (uint32_t)config->safe_pose.z_pulses);
     }
 
     for (uint8_t task = 0U; task < MISSION_TASK_COUNT; ++task) {
         const MissionTaskConfig *config = &g_task.configs[task];
-        uint8_t *target = &record[MISSION_STORAGE_CONFIG_OFFSET +
-                                  task * MISSION_STORAGE_CONFIG_SIZE];
+        uint8_t *target = &record[offset];
         uint8_t flags = 0U;
         if (config->align_configured != 0U) flags |= MISSION_CONFIG_ALIGN;
         if (config->blind_configured != 0U) flags |= MISSION_CONFIG_BLIND;
         if (config->z_enabled != 0U) flags |= MISSION_CONFIG_Z_ENABLED;
         if (config->z_configured != 0U) flags |= MISSION_CONFIG_Z_CONFIGURED;
+        if (config->blind_direction < 0) flags |= 0x10U;
+        if (config->z_direction < 0) flags |= 0x20U;
         storage_write_u16(&target[0], (uint16_t)config->target_x);
         storage_write_u16(&target[2], (uint16_t)config->target_y);
-        storage_write_u16(&target[4], config->blind_stop_mm);
-        target[6] = flags;
-        target[7] = (uint8_t)config->blind_direction;
-        storage_write_u32(&target[8], config->blind_pulses_per_mm);
-        storage_write_u16(&target[12], config->z_stop_mm);
-        target[14] = (uint8_t)config->z_direction;
-        storage_write_u32(&target[16], config->z_max_pulses);
+        if (task != MISSION_TASK_FRAME_PUT) {
+            storage_write_u16(&target[4], config->blind_stop_mm);
+            storage_write_u24(&target[6], config->blind_pulses_per_mm);
+            target[9] = flags;
+            offset += 10U;
+        } else {
+            storage_write_u16(&target[4], config->z_stop_mm);
+            storage_write_u24(&target[6], config->z_max_pulses);
+            target[9] = flags;
+            offset += 10U;
+        }
+        if (task == MISSION_TASK_TAG_PUT) {
+            storage_write_u16(&target[10], config->z_stop_mm);
+            storage_write_u24(&target[12], config->z_max_pulses);
+            offset += 5U;
+        }
     }
+    if (offset != MISSION_STORAGE_CRC_OFFSET) return 0U;
     storage_write_u32(&record[MISSION_STORAGE_CRC_OFFSET],
         storage_crc32(&record[4], MISSION_STORAGE_CRC_OFFSET - 4U));
 
@@ -832,7 +1108,7 @@ uint8_t MissionTask_SaveConfiguration(void)
         g_task.status.storage_state = MISSION_STORAGE_IO_ERROR;
         return 0U;
     }
-    g_task.status.storage_generation = generation;
+    g_task.status.storage_generation = (uint32_t)generation;
     g_task.status.storage_state = MISSION_STORAGE_VALID;
     return 1U;
 }
@@ -871,13 +1147,15 @@ uint8_t MissionTask_IsActive(void)
 const char *MissionTask_StateString(MissionTaskState state)
 {
     static const char *const names[] = {
-        "IDLE", "PRECHECK", "PRECHECK_HELD", "PRESET_POSE", "RED_OBSERVE",
+        "IDLE", "PRECHECK", "PRECHECK_HELD", "PREPARE_GRIP_OPEN",
+        "PRESET_POSE", "RED_OBSERVE",
         "TAG_OBSERVE", "FRAME_OBSERVE", "FRONT_RED_READY",
         "FRONT_TAG_READY", "DOWN_FRAME_READY", "ALIGN_XZ", "ALIGN_XY",
         "STABLE", "RECORD_XYZ", "BLIND_Y", "OPTIONAL_Z_DROP",
         "TOF3_Z_DESCEND", "GRIP_CLOSE", "GRIP_OPEN",
-        "RETURN_RECORDED_POSE", "VERIFY", "SAFE_RETREAT", "ABORTING",
-        "COMPLETE", "FAULT"
+        "RETURN_RECORDED_POSE", "VERIFY", "SAFE_RETREAT",
+        "RECOVERY_WAIT_IDLE", "RECOVER_PRESET", "ABORTING", "COMPLETE",
+        "FAULT"
     };
     return ((uint32_t)state < (sizeof(names) / sizeof(names[0]))) ?
            names[state] : "UNKNOWN";

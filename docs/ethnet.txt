@@ -1,0 +1,442 @@
+你是一名资深 STM32、FreeRTOS 和嵌入式网络工程师。请修改我提供的 STM32 龙门架工程，为它增加一个稳定的 TCP Socket Server，使其能够与现有 Python 中心端通信。
+
+这块 STM32 控制的是龙门架，用于夹取、搬运和放置物品，不是导航小车。
+
+我的 STM32 工程中已经写好了电机运动、原点回归、限位检测、夹爪/吸盘、夹取和放置等底层方法。你不要重新设计这些运动算法，只需要：
+
+1. 找到并复用已有方法。
+2. 编写网络通信层。
+3. 编写命令分发和龙门架适配层。
+4. 给出调用已有方法的大体框架。
+5. 不确定的硬件方法用清晰的适配接口和 TODO 表示。
+6. 不得用延时假装动作完成。
+7. 不得破坏现有电机控制、中断、定时器和限位保护。
+
+一、首先检查工程
+
+修改前先确认：
+
+- STM32具体型号
+- 是否使用 FreeRTOS
+- 使用 LwIP、W5500 还是其他网络方案
+- 使用 Raw API、Netconn API、BSD Socket API 还是 WIZnet ioLibrary
+- 已有龙门架控制文件和公开接口
+- 哪个方法负责回原点
+- 哪个方法负责夹取
+- 哪个方法负责放置
+- 哪个方法负责停止
+- 如何判断动作完成、失败、超时和限位触发
+- 工程是否由 CubeMX 生成
+
+必须复用现有网络栈和龙门架方法。不要混用不同类型的 LwIP API，也不要覆盖 CubeMX 自动生成区域。
+
+二、网络角色
+
+Python 中心端是 TCP Client。
+
+STM32 龙门架是 TCP Server，默认监听：
+
+0.0.0.0:5000
+
+STM32持续运行：
+
+网络初始化
+→ 创建监听Socket
+→ bind
+→ listen
+→ accept中心端
+→ 发送hello
+→ 收发消息和心跳
+→ 连接断开
+→ 清理旧Socket
+→ 重新accept
+
+中心端关闭、网线拔插、路由器重启或发送失败后，STM32不得卡死，必须能够重新接受连接。
+
+三、两套静态IP配置
+
+不使用DHCP，STM32使用静态IP。
+
+1. 电脑直连测试模式
+
+STM32静态IP：
+
+192.168.137.10
+
+端口：
+
+5000
+
+子网掩码默认：
+
+255.255.255.0
+
+中心端配置文件中的设备地址改为：
+
+"host": "192.168.137.10",
+"port": 5000
+
+电脑网口也必须配置在192.168.137.0/24网段中。网关不要擅自写死，应根据电脑网口实际配置填写；如果不需要跨网段通信，可以使用0.0.0.0。
+
+2. 路由器正式组网模式
+
+STM32静态IP：
+
+192.168.10.150
+
+端口：
+
+5000
+
+子网掩码默认：
+
+255.255.255.0
+
+中心端配置改为：
+
+"host": "192.168.10.150",
+"port": 5000
+
+网关一般由实际路由器地址决定，可能是192.168.10.1，但必须做成配置项，不允许未经确认直接写死。
+
+请建立集中式网络配置，例如：
+
+typedef enum {
+    NETWORK_PROFILE_DIRECT_PC,
+    NETWORK_PROFILE_ROUTER
+} NetworkProfile_t;
+
+或者使用编译宏：
+
+#define NETWORK_PROFILE_DIRECT_PC  1
+
+测试和正式组网切换时，只修改一个配置项，不允许到多个文件中分别修改IP。
+
+四、通信协议
+
+协议使用：
+
+UTF-8 JSON + '\n'
+
+每条JSON消息以换行符结束。
+
+必须正确处理：
+
+- TCP半包
+- TCP粘包
+- 一次收到多条消息
+- 一条消息分多次收到
+- send部分发送
+- recv返回0
+- Socket异常断开
+- 非法JSON
+- 接收缓冲区溢出
+
+不能假设一次recv就是一条完整消息。
+
+每条消息都必须包含：
+
+{
+  "type": "非空字符串",
+  "device_id": "非空字符串",
+  "msg_id": "非空字符串",
+  "timestamp": "非空字符串",
+  "payload": {}
+}
+
+msg_id可使用“启动计数、HAL_GetTick和自增序号”组合生成。
+
+没有RTC时，timestamp可以暂时使用明确标识的运行时间字符串，但不能为空，且不能因为等待网络校时阻塞Socket服务。
+
+五、设备身份兼容
+
+修改前必须检查中心端实际支持的device_id。
+
+当前中心端只认识：
+
+- car
+- drone
+
+尚未定义gantry设备。
+
+因此：
+
+- 如果要求保持当前中心端完全不变，STM32发出的device_id暂时使用中心端配置所对应的值，例如"car"。
+- 如果中心端已经增加"gantry"，则严格使用"gantry"。
+- 禁止只修改STM32为"gantry"，却不修改中心端校验逻辑。
+- 最终报告中必须明确说明实际使用了哪个device_id以及原因。
+
+六、连接后的第一条消息
+
+中心端连接后，STM32必须首先发送hello，在hello之前不能发送heartbeat。
+
+示例：
+
+{
+  "type": "hello",
+  "device_id": "实际兼容的设备ID",
+  "msg_id": "唯一ID",
+  "timestamp": "时间字符串",
+  "payload": {
+    "protocol_version": 1,
+    "device_type": "gantry",
+    "capabilities": []
+  }
+}
+
+capabilities不能凭空填写。必须根据中心端已经定义的命令以及STM32实际具备的方法生成。
+
+七、心跳
+
+STM32每2秒发送一次：
+
+{
+  "type": "heartbeat",
+  "device_id": "实际设备ID",
+  "msg_id": "唯一ID",
+  "timestamp": "时间字符串",
+  "payload": {
+    "status": "online"
+  }
+}
+
+中心端心跳超时时间为7秒。
+
+龙门架执行夹取或放置期间，Socket接收和心跳仍然必须运行。禁止在网络任务中直接阻塞执行完整龙门架动作。
+
+收到中心端heartbeat后，只更新最后通信时间，不需要额外回复ACK。
+
+八、龙门架适配层
+
+不要把网络协议直接写进现有电机控制代码。
+
+新增独立适配层，例如：
+
+gantry_adapter.h
+gantry_adapter.c
+
+建议提供类似接口：
+
+typedef enum {
+    GANTRY_RESULT_OK,
+    GANTRY_RESULT_BUSY,
+    GANTRY_RESULT_INVALID_PARAM,
+    GANTRY_RESULT_LIMIT_TRIGGERED,
+    GANTRY_RESULT_TIMEOUT,
+    GANTRY_RESULT_HARDWARE_ERROR
+} GantryResult_t;
+
+typedef enum {
+    GANTRY_STATE_IDLE,
+    GANTRY_STATE_RUNNING,
+    GANTRY_STATE_COMPLETED,
+    GANTRY_STATE_FAILED
+} GantryState_t;
+
+GantryResult_t GantryAdapter_Home(void);
+GantryResult_t GantryAdapter_StartPick(const GantryTarget_t *target);
+GantryResult_t GantryAdapter_StartPlace(const GantryTarget_t *target);
+GantryResult_t GantryAdapter_Stop(void);
+GantryState_t GantryAdapter_GetState(void);
+const char *GantryAdapter_GetLastError(void);
+
+以上只是接口框架，具体命名必须优先复用我的现有方法。
+
+如果已有方法是阻塞式的，应当在独立业务任务中调用，不能在Socket接收任务或LwIP回调中调用。
+
+如果已有方法是非阻塞状态机，则由业务任务周期调用，并通过状态或事件通知网络层最终结果。
+
+不要重新实现：
+
+- 步进电机脉冲
+- 方向控制
+- 坐标换算
+- 限位开关
+- 回零流程
+- 夹爪或吸盘控制
+- 运动轨迹
+- 现有安全保护
+
+只写调用和状态衔接框架。
+
+九、命令分发
+
+增加命令分发模块，例如：
+
+gantry_command.h
+gantry_command.c
+
+处理过程为：
+
+收到JSON命令
+→ 校验消息字段
+→ 校验command_id
+→ 根据中心端定义的name查找命令
+→ 校验target
+→ 检查龙门架是否忙碌
+→ 投递到业务队列
+→ 回复accepted
+→ 业务任务调用已有龙门架方法
+→ 等待真实完成或失败信号
+→ 回复completed或failed
+
+严禁自行创造中心端不存在的命令名称。
+
+如果当前中心端没有龙门架命令，则：
+
+1. 先完成Socket、hello、heartbeat、JSON解析和命令适配框架。
+2. 建立命令名称到适配函数的映射表。
+3. 使用TODO明确标出中心端需要增加的命令。
+4. 列出建议命令，例如home、pick、place和emergency_stop，但不要将建议命令描述成已经兼容。
+5. 说明中心端protocol.py还需要增加哪些定义。
+
+命令映射建议采用表驱动，不要写大量重复if-else：
+
+typedef struct {
+    const char *name;
+    GantryResult_t (*handler)(const GantryCommand_t *command);
+} GantryCommandHandler_t;
+
+十、命令响应
+
+命令成功进入业务队列后，立即回复：
+
+{
+  "type": "ack",
+  "device_id": "实际设备ID",
+  "msg_id": "唯一ID",
+  "timestamp": "时间字符串",
+  "payload": {
+    "command_id": "原命令ID",
+    "status": "accepted"
+  }
+}
+
+参数错误、龙门架忙碌、队列已满或命令不支持时回复：
+
+{
+  "type": "ack",
+  "device_id": "实际设备ID",
+  "msg_id": "唯一ID",
+  "timestamp": "时间字符串",
+  "payload": {
+    "command_id": "原命令ID",
+    "status": "rejected",
+    "reason": "明确原因"
+  }
+}
+
+动作真实完成后回复：
+
+{
+  "type": "event",
+  "device_id": "实际设备ID",
+  "msg_id": "唯一ID",
+  "timestamp": "时间字符串",
+  "payload": {
+    "command_id": "原命令ID",
+    "status": "completed"
+  }
+}
+
+动作失败后回复：
+
+{
+  "type": "event",
+  "device_id": "实际设备ID",
+  "msg_id": "唯一ID",
+  "timestamp": "时间字符串",
+  "payload": {
+    "command_id": "原命令ID",
+    "status": "failed",
+    "reason": "限位触发、动作超时或其他真实原因"
+  }
+}
+
+accepted只代表成功接收，不能代表龙门架已经完成动作。
+
+十一、命令去重
+
+按照command_id去重，不是msg_id。
+
+至少保存最近32条命令：
+
+- command_id
+- ACK结果
+- 是否正在执行
+- completed/failed最终结果
+
+收到重复command_id时：
+
+- 不允许重复执行龙门架动作
+- 重发原ACK
+- 已完成时重发最终event
+- 仍在执行时只重发accepted
+
+使用固定数组或环形缓存，禁止无限占用内存。
+
+十二、任务结构
+
+如果使用FreeRTOS，建议至少包含：
+
+1. SocketServerTask
+   - listen、accept、recv和断线恢复
+
+2. ProtocolTask或协议处理模块
+   - 拆包、JSON解析和命令校验
+
+3. GantryCommandTask
+   - 调用已有龙门架方法
+   - 等待真实结果
+
+4. SocketTxTask或发送队列
+   - 统一发送hello、heartbeat、ack和event
+
+5. HeartbeatTimer
+   - 每2秒投递心跳消息
+
+所有发送必须通过同一个TX队列或互斥锁，禁止多个任务同时直接send，否则JSON消息可能交叉。
+
+十三、测试要求
+
+首先使用电脑直连配置：
+
+STM32：192.168.137.10
+端口：5000
+
+至少测试：
+
+1. 电脑能够ping通192.168.137.10。
+2. 中心端能够连接STM32。
+3. 第一条消息是hello。
+4. 中心端持续收到2秒一次的heartbeat。
+5. 半包能够正确拼接。
+6. 粘包能够拆成多条消息。
+7. 非法JSON不会导致程序崩溃。
+8. 重复command_id不会重复执行龙门架动作。
+9. 龙门架动作执行期间心跳不中断。
+10. 中心端重启后STM32能够重新accept。
+11. 网线拔插后服务能够恢复。
+12. 切换到192.168.10.150后能够通过路由器组网。
+13. 所有测试不得绕过现有限位和安全逻辑。
+
+十四、最终交付内容
+
+请提供：
+
+- 修改和新增的所有C/H文件
+- Socket Server完整实现
+- 网络配置文件
+- JSON拆包和解析实现
+- 龙门架适配层框架
+- 命令映射表
+- FreeRTOS任务、队列和互斥锁配置
+- 两套静态IP的切换方法
+- RAM和任务栈占用说明
+- 编译和烧录步骤
+- 电脑直连测试步骤
+- 路由器正式组网步骤
+- 中心端还需增加或修改的协议内容
+- 无法确定的硬件接口TODO
+
+底层龙门架动作方法只需要完成接入框架。若无法确认某个已有函数的用途，先标注TODO并说明应接入的位置，不要擅自重写运动控制。

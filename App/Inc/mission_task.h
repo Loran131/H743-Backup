@@ -21,10 +21,17 @@ typedef enum {
     MISSION_STORAGE_IO_ERROR
 } MissionStorageState;
 
+typedef struct {
+    int32_t x_pulses;
+    int32_t y_pulses;
+    int32_t z_pulses;
+} MissionTaskPose;
+
 typedef enum {
     MISSION_STATE_IDLE = 0,
     MISSION_STATE_PRECHECK,
     MISSION_STATE_PRECHECK_HELD,
+    MISSION_STATE_PREPARE_GRIP_OPEN,
     MISSION_STATE_PRESET_POSE,
     MISSION_STATE_RED_OBSERVE,
     MISSION_STATE_TAG_OBSERVE,
@@ -44,6 +51,8 @@ typedef enum {
     MISSION_STATE_RETURN_RECORDED_POSE,
     MISSION_STATE_VERIFY,
     MISSION_STATE_SAFE_RETREAT,
+    MISSION_STATE_RECOVERY_WAIT_IDLE,
+    MISSION_STATE_RECOVER_PRESET,
     MISSION_STATE_ABORTING,
     MISSION_STATE_COMPLETE,
     MISSION_STATE_FAULT
@@ -62,6 +71,8 @@ typedef struct {
     uint8_t blind_configured;
     uint8_t z_enabled;
     uint8_t z_configured;
+    MissionTaskPose preset_pose;
+    MissionTaskPose safe_pose;
 } MissionTaskConfig;
 
 typedef struct {
@@ -76,6 +87,8 @@ typedef struct {
     uint8_t subflow_max_attempts;
     uint8_t axis_recoveries;
     uint8_t max_axis_recoveries;
+    uint8_t restart_count;
+    uint8_t max_restarts;
     uint16_t subflow_distance_mm;
     int32_t subflow_requested_pulses;
     uint8_t start_pending;
@@ -99,6 +112,10 @@ uint8_t MissionTask_SetBlindY(MissionTaskName task, uint16_t stop_mm,
 uint8_t MissionTask_SetZDrop(MissionTaskName task, uint8_t enabled,
                              uint16_t stop_mm, uint32_t max_pulses,
                              int8_t direction);
+uint8_t MissionTask_SetPresetPose(MissionTaskName task, int32_t x_pulses,
+                                  int32_t y_pulses, int32_t z_pulses);
+uint8_t MissionTask_SetSafePose(MissionTaskName task, int32_t x_pulses,
+                                int32_t y_pulses, int32_t z_pulses);
 uint8_t MissionTask_SetPayload(MissionPayloadState payload);
 uint8_t MissionTask_SaveConfiguration(void);
 void MissionTask_GetStatus(MissionTaskStatus *status);

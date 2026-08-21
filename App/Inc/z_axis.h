@@ -8,7 +8,7 @@ extern "C" {
 #include <stdint.h>
 
 #define Z_AXIS_SOFT_MIN_PULSES       0
-#define Z_AXIS_SOFT_MAX_PULSES       576000
+#define Z_AXIS_SOFT_MAX_PULSES       205080
 #define Z_AXIS_DEFAULT_SPEED_HZ      90000U
 #define Z_AXIS_TRAVEL_MM             36.0f
 #define Z_AXIS_STEPS_PER_MM          16000.0f

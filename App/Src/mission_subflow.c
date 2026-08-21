@@ -51,9 +51,7 @@ typedef struct {
 
 static MissionSubflowRuntime g_subflow;
 static MotionPositionSnapshot g_recorded_pose;
-static MotionPositionSnapshot g_safe_pose;
 static uint8_t g_recorded_pose_valid;
-static uint8_t g_safe_pose_valid;
 static uint8_t g_retain_owner;
 static volatile uint8_t g_cancel_request;
 
@@ -865,10 +863,8 @@ static void poll_pose(uint32_t now)
     const MotionPositionSnapshot *pose;
     if (g_subflow.status.type == MISSION_SUBFLOW_RETURN_POSE)
         pose = &g_recorded_pose;
-    else if (g_subflow.status.type == MISSION_SUBFLOW_PRESET_POSE)
-        pose = &g_subflow.status.pose;
     else
-        pose = &g_safe_pose;
+        pose = &g_subflow.status.pose;
     if (g_subflow.status.type == MISSION_SUBFLOW_RECORD_POSE) {
         if ((g_subflow.status.state == MISSION_SUBFLOW_STARTING) ||
             ((g_subflow.status.state == MISSION_SUBFLOW_RETRY_WAIT) &&
@@ -938,11 +934,9 @@ void MissionSubflow_Init(uint32_t now)
 {
     memset(&g_subflow, 0, sizeof(g_subflow));
     memset(&g_recorded_pose, 0, sizeof(g_recorded_pose));
-    memset(&g_safe_pose, 0, sizeof(g_safe_pose));
     g_subflow.status.state = MISSION_SUBFLOW_IDLE;
     g_subflow.status.state_tick = now;
     g_recorded_pose_valid = 0U;
-    g_safe_pose_valid = 0U;
     g_retain_owner = 0U;
     g_cancel_request = 0U;
 }
@@ -1182,36 +1176,18 @@ uint8_t MissionSubflow_StartPresetPose(MissionTaskName task,
     return 1U;
 }
 
-uint8_t MissionSubflow_SetSafePose(const MotionPositionSnapshot *pose)
-{
-    if (pose_in_limits(pose) == 0U) return 0U;
-    g_safe_pose = *pose;
-    g_safe_pose_valid = 1U;
-    return 1U;
-}
-
-uint8_t MissionSubflow_HasSafePose(void)
-{
-    return g_safe_pose_valid;
-}
-
-uint8_t MissionSubflow_GetSafePose(MotionPositionSnapshot *pose)
-{
-    if ((pose == NULL) || (g_safe_pose_valid == 0U)) return 0U;
-    *pose = g_safe_pose;
-    return 1U;
-}
-
-uint8_t MissionSubflow_StartSafeRetreat(MissionTaskName task, uint32_t now)
+uint8_t MissionSubflow_StartSafeRetreat(MissionTaskName task,
+                                        const MotionPositionSnapshot *pose,
+                                        uint32_t now)
 {
     MotionPositionSnapshot current;
-    if ((g_safe_pose_valid == 0U) ||
+    if ((pose_in_limits(pose) == 0U) ||
         (MotionCoordinator_CaptureSnapshot(&current, 1U, now) == 0U))
         return 0U;
     if (begin(task, MISSION_SUBFLOW_SAFE_RETREAT, 0U,
               SUBFLOW_MAX_ATTEMPTS, now) == 0U)
         return 0U;
-    g_subflow.status.pose = g_safe_pose;
+    g_subflow.status.pose = *pose;
     return 1U;
 }
 

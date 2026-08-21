@@ -128,10 +128,9 @@ uint8_t MissionSubflow_StartReturnPose(MissionTaskName task, uint32_t now);
 uint8_t MissionSubflow_StartPresetPose(MissionTaskName task,
                                        const MotionPositionSnapshot *pose,
                                        uint32_t now);
-uint8_t MissionSubflow_SetSafePose(const MotionPositionSnapshot *pose);
-uint8_t MissionSubflow_HasSafePose(void);
-uint8_t MissionSubflow_GetSafePose(MotionPositionSnapshot *pose);
-uint8_t MissionSubflow_StartSafeRetreat(MissionTaskName task, uint32_t now);
+uint8_t MissionSubflow_StartSafeRetreat(MissionTaskName task,
+                                        const MotionPositionSnapshot *pose,
+                                        uint32_t now);
 void MissionSubflow_Cancel(uint32_t now);
 void MissionSubflow_AbortAll(MissionFailure failure, uint32_t now);
 void MissionSubflow_GetStatus(MissionSubflowStatus *status);

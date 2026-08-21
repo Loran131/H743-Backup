@@ -125,6 +125,10 @@
 #undef TCPIP_THREAD_STACKSIZE
 #define TCPIP_THREAD_STACKSIZE 1536
 
+/* SocketTask needs recv() to wake periodically for heartbeat and final events. */
+#define LWIP_SO_RCVTIMEO 1
+#define LWIP_SO_SNDTIMEO 1
+
 /* USER CODE END 1 */
 
 #ifdef __cplusplus
